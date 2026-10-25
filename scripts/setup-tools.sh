@@ -79,8 +79,14 @@ fetch "$JRE_URL" "$JRE_SHA" java21.zip
 unpack_zip slc-cli.zip "$TOOLS/slc-cli"
 unpack_zip python.zip "$TOOLS/python"
 unpack_zip java21.zip "$TOOLS/java21"
-chmod +x "$TOOLS/slc-cli/slc" "$TOOLS/java21/bin/"* "$TOOLS/python/bin/"* 2>/dev/null || true
-echo "$TOOLS/java21" > "$TOOLS/slc-cli/slc_java_loc.txt"
+# The Java pack keeps its runtime in a jre/ subdirectory. slc's launcher reads the runtime's
+# location from slc_java_loc.txt and silently falls back to any java on PATH if that path is
+# wrong, so check it: slc-cli 6 needs Java 21.
+JAVA_DIR="$TOOLS/java21/jre"
+chmod +x "$TOOLS/slc-cli/slc" "$JAVA_DIR/bin/"* "$TOOLS/python/bin/"* 2>/dev/null || true
+JAVA_VERSION="$("$JAVA_DIR/bin/java" -version 2>&1 || true)"
+[[ "$JAVA_VERSION" == *'version "21'* ]] || { echo "bundled Java 21 not usable at $JAVA_DIR: $JAVA_VERSION" >&2; exit 1; }
+echo "$JAVA_DIR" > "$TOOLS/slc-cli/slc_java_loc.txt"
 
 if [[ -n "${ARM_GCC_DIR:-}" ]]; then
   [[ -x "$ARM_GCC_DIR/bin/arm-none-eabi-gcc" ]] || { echo "ARM_GCC_DIR has no bin/arm-none-eabi-gcc: $ARM_GCC_DIR" >&2; exit 1; }
@@ -114,6 +120,8 @@ export OBJCOPY="$GCC_DIR/bin/arm-none-eabi-objcopy"
 export PYTHON="$TOOLS/venv/bin/python"
 EOF
 
+SLC_VERSION="$("$TOOLS/slc-cli/slc" --version 2>&1)" || { echo "slc failed: $SLC_VERSION" >&2; exit 1; }
+GCC_VERSION="$("$GCC_DIR/bin/arm-none-eabi-gcc" --version)"
 echo "== tools ready"
-"$TOOLS/slc-cli/slc" --version 2>&1 | head -1
-"$GCC_DIR/bin/arm-none-eabi-gcc" --version | head -1
+echo "slc ${SLC_VERSION%%$'\n'*}"
+echo "${GCC_VERSION%%$'\n'*}"
