@@ -1,0 +1,8 @@
+[submodule "third_party/gecko_sdk"]
+	path = third_party/gecko_sdk
+	url = https://github.com/SiliconLabs/gecko_sdk.git
+	shallow = true
+[submodule "third_party/cpc-daemon"]
+	path = third_party/cpc-daemon
+	url = https://github.com/SiliconLabs/cpc-daemon.git
+	shallow = true

@@ -1,0 +1,115 @@
+name: build
+
+# Builds the radio firmware and the AP programs from pinned sources and tools.
+# Every run uploads the outputs with SHA256SUMS as a workflow artifact and records a
+# signed build-provenance attestation for each file. A pushed tag v* also publishes a
+# GitHub release with the same files.
+#
+# Verify a downloaded file:  gh attestation verify <file> --repo <owner>/<repo>
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm   # arm64; releases are always built here so every image comes from the same host
+    permissions:
+      contents: write        # release on tags
+      id-token: write        # build-provenance attestation
+      attestations: write
+    steps:
+      - name: Free disk space (the GSDK checkout is several GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Submodule commits
+        id: sub
+        run: |
+          echo "gsdk=$(git ls-tree HEAD third_party/gecko_sdk | awk '{print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore GSDK
+        id: gsdk
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/gecko_sdk
+          key: gsdk-${{ steps.sub.outputs.gsdk }}
+
+      - name: Fetch submodules
+        run: |
+          git lfs install
+          git submodule update --init --depth 1 third_party/cpc-daemon
+          if [ "${{ steps.gsdk.outputs.cache-hit }}" != "true" ]; then
+            git submodule update --init --depth 1 third_party/gecko_sdk
+            rm -rf .git/modules/third_party/gecko_sdk/lfs   # objects are now in the working tree
+          fi
+          du -sh third_party/gecko_sdk
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabi cmake unzip file
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Restore tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools/dl
+          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup-tools.sh') }}
+
+      - name: Set up tools
+        run: scripts/setup-tools.sh
+
+      - name: ASH codec unit test
+        run: make -C ap test
+
+      - name: Build firmware
+        run: scripts/build-firmware.sh
+
+      - name: Build AP programs
+        run: scripts/build-ap.sh
+
+      - name: Checksums and AP bundle
+        run: |
+          mkdir -p dist
+          cp out/firmware/*.gbl dist/
+          tar -C out -cf - ap | gzip -n > dist/ap-armv7.tar.gz
+          cp out/ap/* dist/
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ruckus-iot-dual-ncp-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file - <<EOF
+          Built by GitHub Actions run ${{ github.run_id }} from commit ${{ github.sha }}.
+
+          Verify any file with: \`gh attestation verify <file> --repo ${{ github.repository }}\`
+          and compare against SHA256SUMS.
+
+          The firmware image contains Silicon Labs software under the Silicon Labs MSLA and
+          may be used only with Silicon Labs radios. See NOTICE.md.
+          EOF

@@ -1,0 +1,15 @@
+# iotd configuration. Install as /writable/data/iotd.conf on the AP.
+# key = value, '#' starts a comment. Everything shown is the default.
+
+# Radios to serve. Both run on the same EFR32MG21 through cpcd.
+ble = yes
+zigbee = yes
+
+# TCP ports (bound on all interfaces).
+ble_port = 6639        # newline-delimited JSON, one advertisement per line
+zigbee_port = 6638     # EZSP in ASH framing, as ser2net would present a serial coordinator
+
+# cpcd binary and its configuration (instance name cpcd_0, the radio's UART, 115200,
+# hardware flow control, encryption disabled, sockets under /tmp/cpcd/cpcd_0).
+cpcd = /writable/data/bin/cpcd
+cpcd_conf = /writable/data/bin/cpcd.conf

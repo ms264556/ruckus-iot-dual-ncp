@@ -1,0 +1,15 @@
+# Downloaded tools, build trees and outputs
+.tools/
+build/
+out/
+dist/
+
+# AP binaries built in place
+ap/iotd/iotd
+ap/tools/ncpflash
+ap/tools/ezsp_probe
+ap/test/ash_codec_test
+
+# Python
+__pycache__/
+*.pyc
