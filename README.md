@@ -47,7 +47,7 @@ Linux, x86_64 or aarch64, with about 15 GB free. Releases are built by GitHub Ac
 different firmware binary, because the compiler itself is a different build.
 
 ```bash
-sudo apt install git git-lfs unzip curl cmake gcc-arm-linux-gnueabi file
+sudo apt install git git-lfs unzip curl cmake gcc-arm-linux-gnueabi libc6-dev-armel-cross file
 curl -LsSf https://astral.sh/uv/install.sh | sh     # uv, for the Python tools (python3-venv also works)
 git lfs install
 git clone --recurse-submodules --shallow-submodules https://github.com/ms264556/ruckus-iot-dual-ncp.git

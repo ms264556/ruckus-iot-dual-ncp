@@ -13,7 +13,7 @@
 # (the directory that contains bin/arm-none-eabi-gcc, e.g. /usr).
 #
 # The cross compiler for the AP binaries (arm-linux-gnueabi-gcc) and cmake come from the
-# distribution: apt install gcc-arm-linux-gnueabi cmake
+# distribution: apt install gcc-arm-linux-gnueabi libc6-dev-armel-cross cmake
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

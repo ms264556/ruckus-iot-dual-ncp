@@ -5,7 +5,7 @@
 #
 # Static ARMv7 (EABI, soft-float calling convention) binaries for the AP's Linux, which has a
 # uClibc userland: static linking keeps them independent of it.
-# Needs: apt install gcc-arm-linux-gnueabi cmake, and the third_party/cpc-daemon submodule.
+# Needs: apt install gcc-arm-linux-gnueabi libc6-dev-armel-cross cmake, and the third_party/cpc-daemon submodule.
 #
 # cpcd is Silicon Labs' cpc-daemon 4.9.1 built without link encryption (matching the
 # firmware) and with its sockets under /tmp (the AP's /dev/shm is read-only).
