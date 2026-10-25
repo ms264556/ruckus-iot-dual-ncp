@@ -80,12 +80,7 @@ jobs:
         run: scripts/build-ap.sh
 
       - name: Checksums and AP bundle
-        run: |
-          mkdir -p dist
-          cp out/firmware/*.gbl dist/
-          tar -C out -cf - ap | gzip -n > dist/ap-armv7.tar.gz
-          cp out/ap/* dist/
-          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+        run: scripts/package.sh
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
