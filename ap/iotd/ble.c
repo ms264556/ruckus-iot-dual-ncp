@@ -45,6 +45,8 @@ static struct {
     int listen_idx;
     struct client clients[MAX_CLIENTS];
     int client_idx[MAX_CLIENTS];
+    struct uplink up;            /* ble_connect */
+    int up_idx;
     cpc_endpoint_t ep;
     int ep_fd;
     int ep_idx;
@@ -59,7 +61,7 @@ static struct {
 
 static int clients_connected(void)
 {
-    int n = 0;
+    int n = uplink_up(&B.up);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         n += B.clients[i].fd >= 0;
     }
@@ -141,11 +143,22 @@ int ble_init(const struct config *c)
         client_init(&B.clients[i], CLIENT_BUF);
         B.client_idx[i] = -1;
     }
-    B.listen_fd = net_listen(c->ble_port);
-    if (B.listen_fd < 0) {
+    uplink_init(&B.up, CLIENT_BUF, c->ble_connect, "ble");
+    B.up_idx = -1;
+    B.listen_fd = -1;
+    if (c->ble_port > 0) {
+        B.listen_fd = net_listen(c->ble_port);
+        if (B.listen_fd < 0) {
+            return -1;
+        }
+        LOGI("ble: advertisement stream on TCP port %d", c->ble_port);
+    }
+    if (B.up.to[0]) {
+        LOGI("ble: advertisement stream to %s", B.up.to);
+    } else if (B.listen_fd < 0 && c->api_port <= 0) {
+        LOGE("ble: ble_port and api_port are 0 and there is no ble_connect: nowhere to send advertisements");
         return -1;
     }
-    LOGI("ble: advertisement stream on TCP port %d", c->ble_port);
     return 0;
 }
 
@@ -155,8 +168,19 @@ void ble_link_down(void)
     B.ep_next_try = 0;
 }
 
-static void broadcast(const char *line, size_t n)
+static void broadcast(uint64_t now, const char *line, size_t n)
 {
+    if (uplink_up(&B.up)) {
+        unsigned before = B.up.c.dropped;
+        if (client_queue(&B.up.c, (const uint8_t *)line, n, true) < 0 || client_flush(&B.up.c) < 0) {
+            uplink_close(&B.up, now, "closed", false);
+        } else if (B.up.c.dropped != before) {
+            B.dropped += B.up.c.dropped - before;
+            if ((B.up.c.dropped & (B.up.c.dropped - 1)) == 0) {
+                LOGW("ble: stream to %s is slow, %u records dropped so far", B.up.to, B.up.c.dropped);
+            }
+        }
+    }
     for (int i = 0; i < MAX_CLIENTS; i++) {
         struct client *c = &B.clients[i];
         if (c->fd < 0) {
@@ -206,7 +230,8 @@ static void emit_record(uint64_t now, uint8_t flags, const uint8_t *addr, uint8_
         return;
     }
     B.adverts++;
-    broadcast(line, off);
+    broadcast(now, line, off);
+    api_advert(now, addr, addr_type, rssi, data, dlen);
 }
 
 static void handle_message(uint64_t now, uint32_t id, const uint8_t *p, size_t len)
@@ -311,18 +336,21 @@ void ble_tick(uint64_t now)
         ep_close(); /* handle belongs to a previous cpc_init */
     }
     ep_try_open(now);
+    uplink_tick(&B.up, now);
     if (B.stats_at == 0) {
         B.stats_at = now;
     } else if (now - B.stats_at >= STATS_PERIOD_MS) {
         B.stats_at = now;
         LOGI("ble: %lu advertisements (%lu legacy, %lu extended), %lu dropped for slow clients, %d clients, %lu boots",
              B.adverts, B.legacy, B.extended, B.dropped, clients_connected(), B.boots);
+        api_log_stats();
     }
 }
 
 void ble_poll_add(struct pollset *ps)
 {
     B.listen_idx = pollset_add(ps, B.listen_fd, POLLIN);
+    B.up_idx = B.up.c.fd >= 0 ? pollset_add(ps, B.up.c.fd, uplink_events(&B.up)) : -1;
     B.ep_idx = B.ep_open ? pollset_add(ps, B.ep_fd, POLLIN) : -1;
     for (int i = 0; i < MAX_CLIENTS; i++) {
         struct client *c = &B.clients[i];
@@ -330,10 +358,33 @@ void ble_poll_add(struct pollset *ps)
     }
 }
 
+static void uplink_poll_handle(short re, uint64_t now)
+{
+    if (B.up.c.fd < 0 || !re) {
+        return;
+    }
+    if (B.up.connecting) {
+        uplink_connected(&B.up, re, now);
+        return;
+    }
+    if (re & (POLLIN | POLLERR | POLLHUP)) {
+        uint8_t sink[256];
+        ssize_t r = read(B.up.c.fd, sink, sizeof(sink)); /* input is ignored; EOF closes */
+        if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
+            uplink_close(&B.up, now, "closed by the other end", false);
+            return;
+        }
+    }
+    if ((re & POLLOUT) && client_flush(&B.up.c) < 0) {
+        uplink_close(&B.up, now, "closed", false);
+    }
+}
+
 void ble_poll_handle(const struct pollset *ps, uint64_t now)
 {
+    uplink_poll_handle(pollset_revents(ps, B.up_idx), now);
     if (pollset_revents(ps, B.listen_idx) & POLLIN) {
-        int fd = net_accept(B.listen_fd);
+        int fd = net_accept(B.listen_fd, NULL);
         if (fd >= 0) {
             int slot = -1;
             for (int i = 0; i < MAX_CLIENTS && slot < 0; i++) {
@@ -380,6 +431,7 @@ void ble_poll_handle(const struct pollset *ps, uint64_t now)
 
 void ble_shutdown(void)
 {
+    client_close(&B.up.c);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         client_close(&B.clients[i]);
     }

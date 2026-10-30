@@ -9,6 +9,8 @@ ap/iotd/iotd
 ap/tools/ncpflash
 ap/tools/ezsp_probe
 ap/test/ash_codec_test
+ap/test/crypto_vectors
+ap/test/api_harness
 
 # Python
 __pycache__/

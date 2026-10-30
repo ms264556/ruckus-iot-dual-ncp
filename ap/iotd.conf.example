@@ -6,8 +6,32 @@ ble = yes
 zigbee = yes
 
 # TCP ports (bound on all interfaces).
-ble_port = 6639        # newline-delimited JSON, one advertisement per line
-zigbee_port = 6638     # EZSP in ASH framing, as ser2net would present a serial coordinator
+ble_port = 6639        # newline-delimited JSON, one advertisement per line; 0: no listener
+
+# Stream the advertisements out to a.b.c.d:port instead of (or as well as) listening, reconnecting
+# 1 s doubling to 30 s, e.g. a local SSH -L forward that carries them to a controller.
+#ble_connect = 127.0.0.1:8883
+zigbee_port = 6638     # EZSP in ASH framing, as ser2net would present a serial coordinator; 0: no listener
+
+# Accept Zigbee clients on the listener only from these IPv4 addresses or networks (spaces or commas).
+#zigbee_allow = 192.168.1.10 192.168.1.0/24
+
+# Serve one Zigbee host through an outbound connection instead: iotd keeps it open, and the first
+# bytes from the other end make it the client. Each outbound stream starts with "iotd ble 1" or
+# "iotd zigbee 1" on a line of its own.
+#zigbee_connect = 127.0.0.1:8883
+
+# The AP's own ESPHome Bluetooth proxy (off while api_port is 0): the ESPHome native API with Noise
+# encryption, announced over mDNS. Needs ble = yes.
+#api_port = 6053
+#api_key = <base64 of 32 bytes>
+#api_name = hall-11c8b0
+#api_friendly_name = Hall
+#api_mac = C8:A6:08:11:C8:B0
+#api_model = Ruckus R560
+#api_bluetooth_mac = F4:B3:B1:E8:0A:CC
+#api_allow = 192.168.1.10
+#api_mdns = yes
 
 # cpcd binary and its configuration (instance name cpcd_0, the radio's UART, 115200,
 # hardware flow control, encryption disabled, sockets under /tmp/cpcd/cpcd_0).

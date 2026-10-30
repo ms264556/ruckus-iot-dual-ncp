@@ -8,7 +8,7 @@ other EZSP host, without the vendor IoT gateway package.
 |---|---|
 | `dual-ncp-gsdk4.4.0-efr32mg21.gbl` | Radio firmware: Silicon Labs EmberZNet 7.4.0.0 Zigbee NCP (EZSP v13) and Bluetooth 7.0.0 NCP (BGAPI), multiplexed over one UART with CPC |
 | `cpcd` | Silicon Labs' CPC daemon 4.9.1, the UART multiplexer, built for the AP |
-| `iotd` | The AP daemon: supervises `cpcd`, serves Zigbee as EZSP-over-ASH on TCP 6638 and Bluetooth advertisements as JSON on TCP 6639 |
+| `iotd` | The AP daemon: supervises `cpcd`, serves Zigbee as EZSP-over-ASH on TCP 6638 and Bluetooth advertisements as JSON on TCP 6639, or streamed out to an address (`ble_connect`) |
 | `ncpflash` | Flashes a GBL image onto the radio through its Gecko bootloader |
 | `ezsp_probe` | Diagnostic: queries the Zigbee NCP directly through `cpcd` |
 
@@ -111,7 +111,12 @@ process. It reflashes its own radio image within a couple of minutes.
 * **Home Assistant ZHA**: add the Zigbee integration with radio type EZSP and the serial path
   `socket://<ap-address>:6638`.
 * **zigbee2mqtt**: `adapter: ember`, `port: tcp://<ap-address>:6638`.
-* **Bluetooth**: connect to TCP 6639 and read one JSON object per line per advertisement.
+* **Bluetooth in Home Assistant**: set `api_port` and an `api_key`; the AP then appears as a
+  discovered ESPHome device with that encryption key.
+* Set `zigbee_allow` to Home Assistant's address so nothing else on the network can use the
+  coordinator, or use `zigbee_connect` behind a controller that relays it.
+* **Bluetooth**: connect to TCP 6639 and read one JSON object per line per advertisement, or set
+  `ble_connect` and accept the stream.
 
 Interfaces, configuration and behaviour are described in [`ap/README.md`](ap/README.md).
 

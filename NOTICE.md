@@ -5,6 +5,18 @@
 Everything committed to this repository (build scripts, `ap/`, `firmware/*.py`, documentation)
 is licensed under the MIT licence in [`LICENSE`](LICENSE).
 
+## Public-domain code that `ap/iotd/crypto.c` follows
+
+`crypto.c` (the ESPHome API's Noise transport) is written for this repository, but two parts follow
+public-domain implementations closely:
+
+* X25519: the field arithmetic and Montgomery ladder of TweetNaCl (Bernstein, van Gastel,
+  Janssen, Lange, Schwabe, Smetsers), https://tweetnacl.cr.yp.to/, public domain.
+* Poly1305: the 26-bit limb layout of Andrew Moon's poly1305-donna (32-bit),
+  https://github.com/floodyberry/poly1305-donna, public domain or MIT.
+
+SHA-256, HMAC and ChaCha20 follow their specifications (FIPS 180-4, RFC 2104, RFC 8439).
+
 ## Silicon Labs software
 
 Two Silicon Labs projects are referenced as Git submodules and are not part of this repository:

@@ -56,9 +56,10 @@ int main(int argc, char **argv)
         }
         LOGW("no %s, using defaults", conf_path);
     }
-    LOGI("iotd starting: ble %s (port %d), zigbee %s (port %d), cpcd %s -c %s",
-         cfg.ble_enabled ? "on" : "off", cfg.ble_port, cfg.zigbee_enabled ? "on" : "off", cfg.zigbee_port,
-         cfg.cpcd_path, cfg.cpcd_conf);
+    LOGI("iotd starting: ble %s (port %d, connect %s, esphome api %d), zigbee %s (port %d, %d allowed, connect %s), cpcd %s -c %s",
+         cfg.ble_enabled ? "on" : "off", cfg.ble_port, cfg.ble_connect[0] ? cfg.ble_connect : "none", cfg.api_port,
+         cfg.zigbee_enabled ? "on" : "off", cfg.zigbee_port, cfg.zigbee_allow.n,
+         cfg.zigbee_connect[0] ? cfg.zigbee_connect : "none", cfg.cpcd_path, cfg.cpcd_conf);
     if (!cfg.ble_enabled && !cfg.zigbee_enabled) {
         LOGE("both radios disabled, nothing to do");
         return 1;
@@ -74,6 +75,10 @@ int main(int argc, char **argv)
     if (cfg.ble_enabled && ble_init(&cfg) < 0) {
         return 1;
     }
+    /* The ESPHome proxy needs the Bluetooth radio. */
+    if (cfg.ble_enabled && (api_init(&cfg) < 0 || mdns_init(&cfg) < 0)) {
+        return 1;
+    }
     if (cfg.zigbee_enabled && zb_init(&cfg) < 0) {
         return 1;
     }
@@ -86,6 +91,8 @@ int main(int argc, char **argv)
         link_tick(now);
         if (cfg.ble_enabled) {
             ble_tick(now);
+            api_tick(now);
+            mdns_tick(now);
         }
         if (cfg.zigbee_enabled) {
             zb_tick(now);
@@ -93,6 +100,8 @@ int main(int argc, char **argv)
         pollset_reset(&ps);
         if (cfg.ble_enabled) {
             ble_poll_add(&ps);
+            api_poll_add(&ps);
+            mdns_poll_add(&ps);
         }
         if (cfg.zigbee_enabled) {
             zb_poll_add(&ps);
@@ -108,6 +117,8 @@ int main(int argc, char **argv)
         now = now_ms();
         if (cfg.ble_enabled) {
             ble_poll_handle(&ps, now);
+            api_poll_handle(&ps, now);
+            mdns_poll_handle(&ps);
         }
         if (cfg.zigbee_enabled) {
             zb_poll_handle(&ps, now);
@@ -119,6 +130,8 @@ int main(int argc, char **argv)
         zb_shutdown();
     }
     if (cfg.ble_enabled) {
+        mdns_shutdown();
+        api_shutdown();
         ble_shutdown();
     }
     link_shutdown();

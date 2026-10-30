@@ -57,7 +57,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabi libc6-dev-armel-cross cmake unzip file
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabi libc6-dev-armel-cross cmake unzip file python3-cryptography
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
 
@@ -70,7 +70,7 @@ jobs:
       - name: Set up tools
         run: scripts/setup-tools.sh
 
-      - name: ASH codec unit test
+      - name: Unit tests (ASH codec; crypto against Python cryptography)
         run: make -C ap test
 
       - name: Build firmware

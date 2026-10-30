@@ -8,6 +8,10 @@
  *                               or ack timeout, ERROR after too many timeouts
  * Over CPC the EZSP frames are raw: no ASH, no length prefix, one frame per read.
  *
+ * The host is either a client of the TCP listener (zigbee_port, limited to zigbee_allow) or
+ * whoever is behind the outbound stream (zigbee_connect): iotd keeps that connection open
+ * idle, and the first byte from it makes it the client, as an accept would.
+ *
  * One client at a time. Endpoint 5 is opened when a client connects and closed
  * when it leaves, so the next client finds the NCP's EZSP layer in the same state
  * the SDK's own CPC host (serial-interface-cpc.c) leaves it in. The Zigbee stack
@@ -16,6 +20,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "ash_codec.h"
@@ -42,8 +47,12 @@ struct ring {
 
 static struct {
     int listen_fd, listen_idx;
+    struct allow allow;
+    struct uplink up;        /* zigbee_connect; its fd moves to cl when the host speaks */
+    int up_idx;
     struct client cl;
     int cl_idx;
+    bool cl_is_uplink;
     struct ash_decoder dec;
 
     cpc_endpoint_t ep;
@@ -303,12 +312,23 @@ static void ep_read(uint64_t now)
 }
 
 /* ---- client ---- */
+/* Bytes are waiting on the idle stream; false at EOF or on an error. */
+static bool uplink_has_data(int fd)
+{
+    uint8_t b;
+    return recv(fd, &b, 1, MSG_PEEK | MSG_DONTWAIT) > 0;
+}
+
 static void client_drop(const char *why)
 {
     if (Z.cl.fd >= 0) {
         LOGI("zb: client fd %d closed: %s (%lu host frames, %lu ncp frames, %lu retransmits, %lu naks)", Z.cl.fd,
              why, Z.host_frames, Z.ncp_frames, Z.retransmits, Z.naks_sent);
         client_close(&Z.cl);
+        if (Z.cl_is_uplink) {
+            Z.cl_is_uplink = false;
+            Z.up.next_try = now_ms() + 1000; /* the next host gets a fresh stream */
+        }
     }
     ep_close();
     link_reset();
@@ -464,13 +484,25 @@ int zb_init(const struct config *c)
     memset(&Z, 0, sizeof(Z));
     client_init(&Z.cl, CLIENT_BUF);
     Z.ep_fd = -1;
-    Z.listen_idx = Z.cl_idx = Z.ep_idx = -1;
+    Z.listen_idx = Z.cl_idx = Z.ep_idx = Z.up_idx = -1;
     link_reset();
-    Z.listen_fd = net_listen(c->zigbee_port);
-    if (Z.listen_fd < 0) {
+    Z.allow = c->zigbee_allow;
+    uplink_init(&Z.up, 256, c->zigbee_connect, "zigbee");
+    Z.listen_fd = -1;
+    if (c->zigbee_port > 0) {
+        Z.listen_fd = net_listen(c->zigbee_port);
+        if (Z.listen_fd < 0) {
+            return -1;
+        }
+        LOGI("zb: EZSP/ASH server on TCP port %d%s", c->zigbee_port,
+             Z.allow.n ? " (allowed addresses only)" : "");
+    }
+    if (Z.up.to[0]) {
+        LOGI("zb: EZSP/ASH host through %s", Z.up.to);
+    } else if (Z.listen_fd < 0) {
+        LOGE("zb: zigbee_port is 0 and there is no zigbee_connect: no way for a host to reach the coordinator");
         return -1;
     }
-    LOGI("zb: EZSP/ASH server on TCP port %d", c->zigbee_port);
     return 0;
 }
 
@@ -500,6 +532,9 @@ void zb_tick(uint64_t now)
         client_drop("NCP reset did not complete within 10 s");
     }
     ep_try_open(now);
+    if (Z.cl.fd < 0) {
+        uplink_tick(&Z.up, now); /* while a host is connected, no second stream */
+    }
     if (Z.ack_deadline && now >= Z.ack_deadline) {
         Z.timeouts++;
         if (Z.timeouts > MAX_TIMEOUTS) {
@@ -516,6 +551,7 @@ void zb_tick(uint64_t now)
 void zb_poll_add(struct pollset *ps)
 {
     Z.listen_idx = pollset_add(ps, Z.listen_fd, POLLIN);
+    Z.up_idx = Z.up.c.fd >= 0 ? pollset_add(ps, Z.up.c.fd, uplink_events(&Z.up)) : -1;
     Z.cl_idx = Z.cl.fd >= 0 ? pollset_add(ps, Z.cl.fd, POLLIN | (Z.cl.len ? POLLOUT : 0)) : -1;
     Z.ep_idx = Z.ep_state == EP_OPEN ? pollset_add(ps, Z.ep_fd, POLLIN) : -1;
 }
@@ -523,9 +559,42 @@ void zb_poll_add(struct pollset *ps)
 void zb_poll_handle(const struct pollset *ps, uint64_t now)
 {
     if (pollset_revents(ps, Z.listen_idx) & POLLIN) {
-        int fd = net_accept(Z.listen_fd);
-        if (fd >= 0) {
+        uint32_t peer;
+        int fd = net_accept(Z.listen_fd, &peer);
+        if (fd >= 0 && !allow_match(&Z.allow, peer)) {
+            char ip[16];
+            const uint8_t *p = (const uint8_t *)&peer;
+            snprintf(ip, sizeof(ip), "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+            LOGW("zb: refusing %s: not in zigbee_allow", ip);
+            close(fd);
+        } else if (fd >= 0) {
             client_accept(fd, now);
+        }
+    }
+    short ure = pollset_revents(ps, Z.up_idx);
+    if (Z.up.c.fd >= 0 && ure) {
+        if (Z.up.connecting) {
+            uplink_connected(&Z.up, ure, now);
+        } else if ((ure & POLLOUT) && Z.up.c.len && client_flush(&Z.up.c) < 0) {
+            uplink_close(&Z.up, now, "closed", false);
+        } else if (ure & (POLLERR | POLLHUP)) {
+            uplink_close(&Z.up, now, "closed by the other end", false);
+        } else if ((ure & POLLIN) && !uplink_has_data(Z.up.c.fd)) {
+            uplink_close(&Z.up, now, "closed by the other end", false);
+        } else if (ure & POLLIN) {
+            /* The host spoke: the stream becomes the client (its bytes are read next round). */
+            int fd = Z.up.c.fd;
+            Z.up.c.fd = -1;
+            Z.up.c.len = 0;
+            if (Z.cl.fd >= 0) {
+                LOGW("zb: host on the stream while a listener client is connected, closing the stream");
+                close(fd);
+                Z.up.next_try = now + 1000;
+            } else {
+                LOGI("zb: host speaking through %s", Z.up.to);
+                client_accept(fd, now);
+                Z.cl_is_uplink = true;
+            }
         }
     }
     short re = pollset_revents(ps, Z.cl_idx);
@@ -543,6 +612,7 @@ void zb_poll_handle(const struct pollset *ps, uint64_t now)
 void zb_shutdown(void)
 {
     client_drop("shutdown");
+    client_close(&Z.up.c);
     if (Z.listen_fd >= 0) {
         close(Z.listen_fd);
         Z.listen_fd = -1;
