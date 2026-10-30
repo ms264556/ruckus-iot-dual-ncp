@@ -253,8 +253,16 @@ def main():
         t, _ = receive()
         if t == 8:
             break
+    request(87)                               # unsubscribe; batches already sent still arrive
     request(5)
-    t, _ = receive()
+    while True:
+        try:
+            t, _ = receive(timeout=5)
+        except (socket.timeout, EOFError):
+            t = None
+            break
+        if t == 6:
+            break
     print(f"adverts: {adverts} in {batches} batches from {len(addresses)} addresses over {args.seconds:.0f} s; ping ok; disconnect {'ok' if t == 6 else t}")
     return 0 if t == 6 else 1
 
