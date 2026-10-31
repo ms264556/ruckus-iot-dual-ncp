@@ -6,10 +6,10 @@ other EZSP host, without the vendor IoT gateway package.
 
 | Component | What it is |
 |---|---|
-| `dual-ncp-gsdk4.4.0-efr32mg21.gbl` | Radio firmware: Silicon Labs EmberZNet 7.4.0.0 Zigbee NCP (EZSP v13) and Bluetooth 7.0.0 NCP (BGAPI), multiplexed over one UART with CPC |
+| `dual-ncp-gsdk4.4.0-efr32mg21.gbl`, `dual-ncp-gsdk4.4.0-efr32mg12.gbl` | Radio firmware, one per radio chip: Silicon Labs EmberZNet 7.4.0.0 Zigbee NCP (EZSP v13) and Bluetooth 7.0.0 NCP (BGAPI), multiplexed over one UART with CPC |
 | `cpcd` | Silicon Labs' CPC daemon 4.9.1, the UART multiplexer, built for the AP |
 | `iotd` | The AP daemon: supervises `cpcd`, serves Zigbee as EZSP-over-ASH on TCP 6638 and Bluetooth advertisements as JSON on TCP 6639, or streamed out to an address (`ble_connect`) |
-| `ncpflash` | Flashes a GBL image onto the radio through its Gecko bootloader |
+| `ncpflash` | Flashes a GBL image onto the radio through its Gecko bootloader, reached with the radio's boot-select line or from its running firmware |
 | `ezsp_probe` | Diagnostic: queries the Zigbee NCP directly through `cpcd` |
 
 Home Assistant connects to the AP the same way it connects to a network-attached serial
@@ -17,16 +17,28 @@ coordinator: `socket://<ap-address>:6638`.
 
 ## Hardware
 
-Ruckus APs with a built-in IoT radio carry one of several Silicon Labs radios. This build targets
-the **EFR32MG21**, the radio in current models. It has been tested on the R560.
+Ruckus APs with a built-in IoT radio carry one of several Silicon Labs radios. There is a build
+for each Zigbee-capable one:
+
+| Radio | Image | Bootloader entry | Tested on |
+|---|---|---|---|
+| EFR32MG21 (Series 2), current models | `dual-ncp-gsdk4.4.0-efr32mg21.gbl` (generated for `brd4180b`, application at 0x4000) | the boot-select line `/proc/v54bsp/iot_rcv` with the reset line `iot_rst` (`ncpflash --enter pins`, the default) | R560 |
+| EFR32MG12 (Series 1), R730 generation | `dual-ncp-gsdk4.4.0-efr32mg12.gbl` (generated for `brd4162a`, application at 0x0) | none in hardware: asked from the running firmware, `ncpflash --enter ezsp` from an EZSP Zigbee image, or `cpcd --enter-bootloader` then `ncpflash --enter none` from this firmware | R730 |
+
+The EFR32BG21 is Bluetooth-only silicon and cannot run Zigbee.
 
 | Item | Notes |
 |---|---|
-| Radio | EFR32MG21 (Series 2). The EFR32MG12 (Series 1) used by some models and USB dongles needs its own build target; the EFR32BG21 is Bluetooth-only silicon and cannot run Zigbee |
 | Bootloader | The radio's factory Gecko bootloader (UART XMODEM). It is not modified |
 | UART | `/dev/ttyMSM1` on the models tested so far. Set `uart_device_file` in `cpcd.conf` and pass the device to `ncpflash` if your model differs |
-| Reset and boot lines | `/proc/v54bsp/iot_rst` and `/proc/v54bsp/iot_rcv`, from the Ruckus board support package |
+| Reset and boot lines | `/proc/v54bsp/iot_rst` and, on EFR32MG21 models, `/proc/v54bsp/iot_rcv`, from the Ruckus board support package |
 | AP firmware | Needs a root shell on the AP. Files live in `/writable/data`, which persists across reboots |
+
+**On an EFR32MG12 radio the first flash is one-way.** Its factory firmware cannot be restored,
+and with no hardware bootloader entry an image whose UART link does not come up can only be
+recovered with a debug probe. The release image has been run on the R730; the vendor's own
+EFR32MG12 Zigbee image is a usable fallback. A lab build that parks the radio in its bootloader
+when no host connects within N minutes: `NCP_DEADMAN_MINUTES=N scripts/build-firmware.sh mg12`.
 
 ## Getting the binaries
 
@@ -55,7 +67,8 @@ cd ruckus-iot-dual-ncp
 
 scripts/setup-tools.sh       # pinned slc-cli, Java 21, Python pack, Arm GNU 12.2.rel1, pygbl -> .tools/
 make -C ap test              # ASH codec unit test
-scripts/build-firmware.sh    # -> out/firmware/dual-ncp-gsdk4.4.0-efr32mg21.gbl
+scripts/build-firmware.sh mg21   # -> out/firmware/dual-ncp-gsdk4.4.0-efr32mg21.gbl
+scripts/build-firmware.sh mg12   # -> out/firmware/dual-ncp-gsdk4.4.0-efr32mg12.gbl
 scripts/build-ap.sh          # -> out/ap/
 ```
 
@@ -65,9 +78,12 @@ installed instead of Arm GNU 12.2.rel1, set `ARM_GCC_DIR` (for example `ARM_GCC_
 running it.
 
 How the firmware is made: `scripts/build-firmware.sh` generates the GSDK 4.4.0 sample
-`zigbee_ncp-ble_ncp-uart` for the `brd4180b` EFR32MG21 radio board, switches its low-frequency
-clocks to the internal LFRCO (the AP radio modules have no 32.768 kHz crystal), turns CPC link
-encryption off, builds it, and packages it as a GBL at 0x4000 above the bootloader.
+`zigbee_ncp-ble_ncp-uart` for the radio board whose UART pins match the AP's radio (`brd4180b`
+for the EFR32MG21, `brd4162a` for the EFR32MG12), switches its low-frequency clocks to the
+internal LFRCO (the AP radio modules have no 32.768 kHz crystal), turns CPC link encryption off,
+reports its build as the CPC application version (`cpcd` logs it), and for the EFR32MG12 also
+puts the DCDC converter in bypass and switches off the dev kit's SWO, packet-trace, SPI flash and
+VCOM pins. It is packaged as a GBL at its link address.
 
 ## Installing on an AP
 
@@ -78,7 +94,7 @@ you control:
 |---|---|
 | `cpcd`, `iotd`, `ncpflash`, `ezsp_probe`, `start.sh`, `cpcd.conf` | `/writable/data/bin/` |
 | `iotd.conf.example` | `/writable/data/iotd.conf` |
-| `dual-ncp-gsdk4.4.0-efr32mg21.gbl` | `/writable/data/` |
+| the image for your radio, `dual-ncp-gsdk4.4.0-efr32mg21.gbl` or `…-efr32mg12.gbl` | `/writable/data/` |
 
 Then, in a root shell on the AP:
 
@@ -89,8 +105,10 @@ chmod 755 /writable/data/bin/*
 for p in $(ps | grep '[r]ksiot_gw_base' | awk '{print $1}'); do kill -STOP $p; done
 killall -9 rksiot_gw rksiot_ble rksiot_zb iotd cpcd 2>/dev/null
 
-# Flash the radio once (about a minute).
+# Flash the radio once (about a minute). EFR32MG21:
 /writable/data/bin/ncpflash /writable/data/dual-ncp-gsdk4.4.0-efr32mg21.gbl
+# EFR32MG12, from its factory or vendor Zigbee firmware (see the warning above):
+#   /writable/data/bin/ncpflash --enter ezsp /writable/data/dual-ncp-gsdk4.4.0-efr32mg12.gbl
 
 # Start the daemon.
 /writable/data/bin/start.sh

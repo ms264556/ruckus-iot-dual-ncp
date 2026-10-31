@@ -22,8 +22,8 @@ all: iotd/iotd tools/ncpflash tools/ezsp_probe
 iotd/iotd: $(IOTD_SRCS) $(IOTD_HDRS)
 	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -I$(CPC_INC) -o $@ $(IOTD_SRCS) $(CPC_LIB) -lpthread
 
-tools/ncpflash: tools/ncpflash.c
-	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -o $@ $<
+tools/ncpflash: tools/ncpflash.c iotd/ash_codec.c iotd/ash_codec.h
+	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -Iiotd -o $@ tools/ncpflash.c iotd/ash_codec.c
 
 tools/ezsp_probe: tools/ezsp_probe.c
 	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -I$(CPC_INC) -o $@ $< $(CPC_LIB) -lpthread

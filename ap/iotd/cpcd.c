@@ -32,8 +32,32 @@ void cpcd_configure(const struct config *c)
 
 pid_t cpcd_pid(void) { return child; }
 
+/* Pulse the radio's reset line before cpcd starts. cpcd resets the NCP itself (a software reset through the CPC system
+ * endpoint), but on the R730's EFR32MG12 that reset lands the radio in its Gecko bootloader whenever the Bluetooth
+ * scanner has run in the session before (the MG21 of the R560 is not affected); a hardware reset always boots the
+ * application. Nothing is lost: cpcd's reset sequence follows anyway. APs without the line (no /proc/v54bsp/iot_rst)
+ * skip this. */
+static void radio_reset_pulse(void)
+{
+    static const char *line = "/proc/v54bsp/iot_rst";
+    int fd = open(line, O_WRONLY);
+    if (fd < 0) {
+        return;
+    }
+    if (write(fd, "0\n", 2) == 2) {
+        usleep(300 * 1000);
+        lseek(fd, 0, SEEK_SET);
+        if (write(fd, "1\n", 2) == 2) {
+            LOGI("radio reset pulse on %s before cpcd starts", line);
+            usleep(800 * 1000); /* let the application come up before cpcd talks to it */
+        }
+    }
+    close(fd);
+}
+
 static void start(uint64_t now)
 {
+    radio_reset_pulse();
     pid_t p = fork();
     if (p < 0) {
         LOGE("fork for cpcd: %s", strerror(errno));

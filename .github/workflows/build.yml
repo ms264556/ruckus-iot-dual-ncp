@@ -73,8 +73,11 @@ jobs:
       - name: Unit tests (ASH codec; crypto against Python cryptography)
         run: make -C ap test
 
-      - name: Build firmware
-        run: scripts/build-firmware.sh
+      - name: Build firmware (EFR32MG21)
+        run: scripts/build-firmware.sh mg21
+
+      - name: Build firmware (EFR32MG12)
+        run: scripts/build-firmware.sh mg12
 
       - name: Build AP programs
         run: scripts/build-ap.sh
