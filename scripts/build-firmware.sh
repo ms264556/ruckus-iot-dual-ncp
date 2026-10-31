@@ -41,7 +41,12 @@ esac
 [[ "$DEADMAN" =~ ^[0-9]+$ ]] || { echo "NCP_DEADMAN_MINUTES must be a number of minutes" >&2; exit 2; }
 SUFFIX="efr32$TARGET"
 [[ "$DEADMAN" != 0 ]] && SUFFIX="$SUFFIX-deadman$DEADMAN"
-VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)-$TARGET"
+# Not `describe --dirty`: it also inspects submodules, and CI restores the GSDK from a cache without its
+# .git/modules entry, which makes describe fail and stamped release images "unknown".
+VERSION="$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo unknown)"
+dirty=0; git -C "$ROOT" diff-index --quiet --ignore-submodules HEAD -- 2>/dev/null || dirty=$?
+[[ $dirty == 1 ]] && VERSION="$VERSION-dirty"
+VERSION="$VERSION-$TARGET"
 [[ "$DEADMAN" != 0 ]] && VERSION="$VERSION-deadman$DEADMAN"
 
 SDK="$ROOT/third_party/gecko_sdk"
