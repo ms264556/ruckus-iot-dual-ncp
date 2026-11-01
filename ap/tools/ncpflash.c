@@ -17,6 +17,10 @@
  *   none  the radio must already be at the prompt
  *
  * Only pins touches iot_rcv; ezsp may pulse iot_rst, which restarts the application.
+ *
+ * The UART starts without RTS/CTS. An NCP that sends no RSTACK is tried again with them on (the R760's factory
+ * MG21 is silent until RTS is asserted), and a bootloader that shows no prompt is nudged once with them switched
+ * the other way.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -128,6 +132,28 @@ static int serial_open(const char *dev, int baud)
     return fd;
 }
 
+/* RTS/CTS on the UART. Off by default (the R730's MG12 runs without); the R760's factory MG21 sends nothing until the
+ * host asserts RTS, which this UART does only with hardware flow control on. */
+static int flow_control;
+
+static void set_flow_control(int fd, int on)
+{
+    struct termios tio;
+    if (tcgetattr(fd, &tio) != 0) {
+        perror("tcgetattr");
+        return;
+    }
+    if (on) {
+        tio.c_cflag |= CRTSCTS;
+    } else {
+        tio.c_cflag &= ~CRTSCTS;
+    }
+    tcsetattr(fd, TCSANOW, &tio);
+    tcflush(fd, TCIOFLUSH);
+    flow_control = on;
+    fprintf(stderr, "uart: RTS/CTS %s\n", on ? "on" : "off");
+}
+
 static int read_byte(int fd, int timeout_ms)
 {
     long deadline = ms_now() + timeout_ms;
@@ -215,8 +241,14 @@ static int ash_read_frame(int fd, struct ash_decoder *d, int timeout_ms)
 
 static int ash_reset(int fd, struct ash_decoder *d)
 {
-    for (int attempt = 0; attempt < 4; attempt++) {
-        if (attempt == 3) {
+    for (int attempt = 0; attempt < 8; attempt++) {
+        if (attempt == 4) {
+            if (flow_control) {
+                break;
+            }
+            set_flow_control(fd, 1); /* nothing came back: an NCP that waits for RTS */
+        }
+        if (attempt % 4 == 3) {
             reset_pulse(); /* restarts the application, which announces itself with RSTACK */
         } else {
             uint8_t can = ASH_CAN;
@@ -528,8 +560,13 @@ int main(int argc, char **argv)
             return 1;
         }
         if (wait_prompt(fd, pins ? 6000 : 10000) != 0) {
-            fprintf(stderr, "\nno bootloader prompt\n");
-            return 1;
+            /* The bootloader may use RTS/CTS differently from the application: try the other way once. Nothing has
+             * been written to the radio yet; the upload starts only at the prompt. */
+            set_flow_control(fd, !flow_control);
+            if (wait_prompt(fd, 4000) != 0) {
+                fprintf(stderr, "\nno bootloader prompt\n");
+                return 1;
+            }
         }
     }
     fprintf(stderr, "\nbootloader prompt seen, selecting upload\n");
