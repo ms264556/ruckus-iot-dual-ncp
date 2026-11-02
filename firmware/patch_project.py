@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 """Apply the per-target changes to a generated GSDK project (after patch_lfrco.py).
 
-    patch_project.py <generated project directory> <mg21|mg12> <app version> <dead-man minutes>
+    patch_project.py <generated project directory> <mg21|mg12> <app version> <dead-man minutes> [ncp|thread]
 
 Both targets:
   app.c      firmware/ncp_app_hooks.c appended, with NCP_APP_VERSION and NCP_DEADMAN_MINUTES
-  main.c     app_init() calls ncp_app_hooks_init()
-  autogen/linkerfile_base.ld   the Gecko bootloader's reset-cause word (first word of RAM) reserved
+             (and firmware/thread_app_hooks.c for thread: the Series 1 watchdog the bootloader leaves on)
+  app_init() calls ncp_app_hooks_init() (in main.c for the dual NCP, in app.c for the OpenThread samples)
+  autogen/linkerfile_base.ld (linkerfile.ld in the OpenThread samples)
+                               the Gecko bootloader's reset-cause word (first word of RAM) reserved
                                ahead of .stack, so a busy session cannot leave a value there that the
                                bootloader takes as a "reboot into bootloader" request on the next reset
+
+thread only (scripts/build-thread.sh):
+  <project>.project.mak          OPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE 1: the RCP answers
+                                 Spinel's RESET_BOOTLOADER and the CLI has "reset bootloader", both
+                                 through bootloader_rebootAndInstall(), the way back to the Gecko
+                                 bootloader on a radio without a hardware entry (the R730's EFR32MG12)
+  platform-abstraction/efr32/uartdrv_uart.c   every byte the host sends counts as the host being seen,
+                                 which stops the dead-man reboot (the dual NCP uses cpcd's version query)
 
 mg12 only (the R730's module; the brd4162a board config it is generated from is a dev kit):
   sl_device_init_dcdc_config.h   DCDC init in bypass mode. Series 1 parts come out of reset in
@@ -38,30 +48,60 @@ def sub_define(path: pathlib.Path, name: str, value: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 5 or sys.argv[2] not in ("mg21", "mg12"):
+    if len(sys.argv) not in (5, 6) or sys.argv[2] not in ("mg21", "mg12") or sys.argv[5:] not in ([], ["ncp"], ["thread"]):
         print(__doc__, file=sys.stderr)
         return 2
     root = pathlib.Path(sys.argv[1])
     target, version, deadman = sys.argv[2], sys.argv[3], int(sys.argv[4])
+    thread = sys.argv[5:] == ["thread"]
     if not re.fullmatch(r"[A-Za-z0-9._+-]{1,60}", version):
         raise SystemExit(f"error: unsuitable version string {version!r}")
 
     hooks = (pathlib.Path(__file__).parent / "ncp_app_hooks.c").read_text()
     app = root / "app.c"
-    app.write_text(app.read_text() + "\n"
+    src = app.read_text()
+    if thread:
+        # The OpenThread samples' app_init() lives in app.c and sets up the reset jump; the hooks run after it.
+        src, count = re.subn(r"void app_init\(void\)\n\{\n(    OT_SETUP_RESET_JUMP\(argv\);\n)\}",
+                             r"void ncp_app_hooks_init(void);\nvoid thread_app_hooks_init(void);\n\n"
+                             r"void app_init(void)\n{\n\1    ncp_app_hooks_init();\n    thread_app_hooks_init();\n}", src)
+        if count != 1:
+            raise SystemExit(f"error: OpenThread app_init() not found in {app}")
+        hooks += "\n" + (pathlib.Path(__file__).parent / "thread_app_hooks.c").read_text()
+    app.write_text(src + "\n"
                    + f'#define NCP_APP_VERSION "{version}"\n'
                    + f"#define NCP_DEADMAN_MINUTES {deadman}\n"
                    + hooks)
     print(f"app.c: hooks appended (version {version}, dead-man {deadman} min)")
 
-    main_c = root / "main.c"
-    src = main_c.read_text()
-    src, count = re.subn(r"void app_init\(void\)\s*\{\s*\}",
-                         "void ncp_app_hooks_init(void);\n\nvoid app_init(void)\n{\n  ncp_app_hooks_init();\n}", src)
-    if count != 1:
-        raise SystemExit(f"error: empty app_init() not found in {main_c}")
-    main_c.write_text(src)
-    print("main.c: app_init() calls ncp_app_hooks_init()")
+    if not thread:
+        main_c = root / "main.c"
+        src = main_c.read_text()
+        src, count = re.subn(r"void app_init\(void\)\s*\{\s*\}",
+                             "void ncp_app_hooks_init(void);\n\nvoid app_init(void)\n{\n  ncp_app_hooks_init();\n}", src)
+        if count != 1:
+            raise SystemExit(f"error: empty app_init() not found in {main_c}")
+        main_c.write_text(src)
+    print(f"{'app.c' if thread else 'main.c'}: app_init() calls ncp_app_hooks_init()")
+
+    if thread:
+        mak = next(root.glob("*.project.mak"))
+        src = mak.read_text()
+        src, count = re.subn(r"^(C_DEFS \+= \\\n)", r"\1 '-DOPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE=1' \\\n", src,
+                             count=1, flags=re.M)
+        if count != 1:
+            raise SystemExit(f"error: C_DEFS not found in {mak}")
+        mak.write_text(src)
+        print(f"{mak.name}: OPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE 1")
+
+        uart = next(root.glob("gecko_sdk_*/protocol/openthread/platform-abstraction/efr32/uartdrv_uart.c"))
+        src = uart.read_text()
+        src, count = re.subn(r"^(\s+)otPlatUartReceived\(", r"\1ncp_host_seen_mark();\n\1otPlatUartReceived(", src, flags=re.M)
+        if count != 2:
+            raise SystemExit(f"error: expected 2 otPlatUartReceived() calls in {uart}, found {count}")
+        src = src.replace("static void processReceive(void);", "static void processReceive(void);\nvoid ncp_host_seen_mark(void);", 1)
+        uart.write_text(src)
+        print("uartdrv_uart.c: host bytes mark the host as seen")
 
     # The Gecko bootloader keeps its reset cause in the first word of RAM (btl_interface.c: SRAM_BASE; the bootloader's
     # own link reserves it as .bootloader_reset_section, an application's does not). The generated script puts .stack
@@ -69,7 +109,7 @@ def main() -> int:
     # 0x00000001 as the Bluetooth stack's "reboot into DFU" request: after a busy session, the next software reset (cpcd's
     # start-up reset) parks the radio in its bootloader (seen on the R730, whose radio has no hardware bootloader entry).
     # Reserve the word ahead of the stack, as the bootloader's own link does.
-    ld = root / "autogen" / "linkerfile_base.ld"
+    ld = root / "autogen" / ("linkerfile.ld" if thread else "linkerfile_base.ld")
     src = ld.read_text()
     reserve = ("  . = ORIGIN(RAM);\n\n"
                "  /* The Gecko bootloader's reset cause (BootloaderResetCause_t at SRAM_BASE); never part of the stack. */\n"
@@ -79,7 +119,7 @@ def main() -> int:
     if count != 1 or not re.search(r"\.bootloader_reset_section[\s\S]*?\n  \.stack ", src):
         raise SystemExit(f"error: could not reserve the bootloader reset cause ahead of .stack in {ld}")
     ld.write_text(src)
-    print("linkerfile_base.ld: bootloader reset cause reserved at the start of RAM, ahead of .stack")
+    print(f"{ld.name}: bootloader reset cause reserved at the start of RAM, ahead of .stack")
 
     if target == "mg12":
         config = root / "config"

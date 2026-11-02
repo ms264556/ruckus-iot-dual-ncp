@@ -1,4 +1,4 @@
-/* iotd: supervise cpcd, serve BLE advertisements and Zigbee EZSP/ASH over TCP. */
+/* iotd: supervise cpcd, serve BLE advertisements and Zigbee EZSP/ASH over TCP, or relay a Thread RCP. */
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -14,6 +14,54 @@ static void on_signal(int sig)
 {
     (void)sig;
     stop_flag = 1;
+}
+
+/* The radio runs the OpenThread RCP image: no cpcd, only the UART relay. */
+/* The border router itself on this AP: only otbr-agent's supervision runs. */
+static int run_border_router(const struct config *cfg)
+{
+    LOGI("thread mode: border router on this AP, %s, infrastructure %s (ble and zigbee off)", cfg->thread_uart, cfg->thread_infra);
+    if (otbr_init(cfg) < 0) {
+        return 1;
+    }
+    while (!stop_flag) {
+        otbr_tick(now_ms());
+        usleep(200 * 1000);
+    }
+    LOGI("shutting down");
+    otbr_stop();
+    LOGI("stopped");
+    return 0;
+}
+
+static int run_thread(const struct config *cfg)
+{
+    if (cfg->thread_border_router) {
+        return run_border_router(cfg);
+    }
+    LOGI("thread mode: %s relayed on port %d, %d allowed, connect %s (ble and zigbee off)", cfg->thread_uart,
+         cfg->thread_port, cfg->thread_allow.n, cfg->thread_connect[0] ? cfg->thread_connect : "none");
+    if (thread_init(cfg) < 0) {
+        return 1;
+    }
+    struct pollset ps;
+    while (!stop_flag) {
+        thread_tick(now_ms());
+        pollset_reset(&ps);
+        thread_poll_add(&ps);
+        if (poll(ps.fds, (nfds_t)ps.n, 100) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            LOGE("poll: %s", strerror(errno));
+            break;
+        }
+        thread_poll_handle(&ps, now_ms());
+    }
+    LOGI("shutting down");
+    thread_shutdown();
+    LOGI("stopped");
+    return 0;
 }
 
 static void usage(void)
@@ -56,11 +104,13 @@ int main(int argc, char **argv)
         }
         LOGW("no %s, using defaults", conf_path);
     }
-    LOGI("iotd starting: ble %s (port %d, connect %s, esphome api %d), zigbee %s (port %d, %d allowed, connect %s), cpcd %s -c %s",
-         cfg.ble_enabled ? "on" : "off", cfg.ble_port, cfg.ble_connect[0] ? cfg.ble_connect : "none", cfg.api_port,
-         cfg.zigbee_enabled ? "on" : "off", cfg.zigbee_port, cfg.zigbee_allow.n,
-         cfg.zigbee_connect[0] ? cfg.zigbee_connect : "none", cfg.cpcd_path, cfg.cpcd_conf);
-    if (!cfg.ble_enabled && !cfg.zigbee_enabled) {
+    if (!cfg.thread_enabled) {
+        LOGI("iotd starting: ble %s (port %d, connect %s, esphome api %d), zigbee %s (port %d, %d allowed, connect %s), cpcd %s -c %s",
+             cfg.ble_enabled ? "on" : "off", cfg.ble_port, cfg.ble_connect[0] ? cfg.ble_connect : "none", cfg.api_port,
+             cfg.zigbee_enabled ? "on" : "off", cfg.zigbee_port, cfg.zigbee_allow.n,
+             cfg.zigbee_connect[0] ? cfg.zigbee_connect : "none", cfg.cpcd_path, cfg.cpcd_conf);
+    }
+    if (!cfg.thread_enabled && !cfg.ble_enabled && !cfg.zigbee_enabled) {
         LOGE("both radios disabled, nothing to do");
         return 1;
     }
@@ -71,6 +121,10 @@ int main(int argc, char **argv)
     sa.sa_handler = on_signal;
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
+
+    if (cfg.thread_enabled) {
+        return run_thread(&cfg);
+    }
 
     if (cfg.ble_enabled && ble_init(&cfg) < 0) {
         return 1;

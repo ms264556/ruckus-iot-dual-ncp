@@ -57,7 +57,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabi libc6-dev-armel-cross cmake unzip file python3-cryptography
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabi g++-arm-linux-gnueabi libc6-dev-armel-cross cmake unzip file python3-cryptography
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
 
@@ -79,8 +79,17 @@ jobs:
       - name: Build firmware (EFR32MG12)
         run: scripts/build-firmware.sh mg12
 
+      - name: Build Thread RCP (EFR32MG21)
+        run: scripts/build-thread.sh mg21 ot-rcp
+
+      - name: Build Thread RCP (EFR32MG12)
+        run: scripts/build-thread.sh mg12 ot-rcp
+
       - name: Build AP programs
         run: scripts/build-ap.sh
+
+      - name: Build the AP border router (otbr-agent, ot-ctl)
+        run: scripts/build-otbr.sh
 
       - name: Checksums and AP bundle
         run: scripts/package.sh

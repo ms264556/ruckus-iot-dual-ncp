@@ -50,6 +50,12 @@ const char *sl_cpc_secondary_app_version(void)
   return ncp_version_with_reset;
 }
 
+/* The OpenThread images have no version query: any byte from the host counts (patched into uartdrv_uart.c). */
+void ncp_host_seen_mark(void)
+{
+  ncp_host_seen = true;
+}
+
 #if NCP_DEADMAN_MINUTES > 0
 static sl_sleeptimer_timer_handle_t ncp_deadman_timer;
 

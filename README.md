@@ -2,15 +2,19 @@
 
 Open firmware and AP software that run **Zigbee and Bluetooth LE at the same time** on the
 built-in IoT radio of Ruckus access points, for use with Home Assistant (ZHA), zigbee2mqtt or any
-other EZSP host, without the vendor IoT gateway package.
+other EZSP host, without the vendor IoT gateway package. The same radio can instead be the
+**radio of a Thread border router** (an OpenThread RCP).
 
 | Component | What it is |
 |---|---|
 | `dual-ncp-gsdk4.4.0-efr32mg21.gbl`, `dual-ncp-gsdk4.4.0-efr32mg12.gbl` | Radio firmware, one per radio chip: Silicon Labs EmberZNet 7.4.0.0 Zigbee NCP (EZSP v13) and Bluetooth 7.0.0 NCP (BGAPI), multiplexed over one UART with CPC |
+| `ot-rcp-gsdk4.4.0-efr32mg21.gbl`, `ot-rcp-gsdk4.4.0-efr32mg12.gbl` | Thread radio firmware instead: the OpenThread RCP of GSDK 4.4.0 (`SL-OPENTHREAD/2.4.0.0`), Spinel over HDLC-lite on the UART, for a border router such as otbr-agent |
 | `cpcd` | Silicon Labs' CPC daemon 4.9.1, the UART multiplexer, built for the AP |
-| `iotd` | The AP daemon: supervises `cpcd`, serves Zigbee as EZSP-over-ASH on TCP 6638 and Bluetooth advertisements as JSON on TCP 6639, or streamed out to an address (`ble_connect`) |
-| `ncpflash` | Flashes a GBL image onto the radio through its Gecko bootloader, reached with the radio's boot-select line or from its running firmware |
+| `iotd` | The AP daemon: supervises `cpcd`, serves Zigbee as EZSP-over-ASH on TCP 6638 and Bluetooth advertisements as JSON on TCP 6639, or streamed out to an address (`ble_connect`); with the Thread image, relays the radio's UART to one border router on TCP 6640 instead |
+| `ncpflash` | Flashes a GBL image onto the radio through its Gecko bootloader, reached with the radio's boot-select line or from its running firmware (EZSP, CPC or Spinel) |
 | `ezsp_probe` | Diagnostic: queries the Zigbee NCP directly through `cpcd` |
+| `spinel_probe` | Diagnostic: asks a radio running the Thread image for its version and EUI-64 |
+| `otbr-agent`, `ot-ctl`, `mdnsd` | The Thread border router on the AP itself (OpenThread's otbr-agent from the GSDK, its CLI, and Apple's mDNS responder for the border agent and SRP advertising), run by `iotd` with `thread_border_router = yes` |
 
 Home Assistant connects to the AP the same way it connects to a network-attached serial
 coordinator: `socket://<ap-address>:6638`.
@@ -23,7 +27,12 @@ for each Zigbee-capable one:
 | Radio | Image | Bootloader entry | Tested on |
 |---|---|---|---|
 | EFR32MG21 (Series 2), current models | `dual-ncp-gsdk4.4.0-efr32mg21.gbl` (generated for `brd4180b`, application at 0x4000) | the boot-select line `/proc/v54bsp/iot_rcv` with the reset line `iot_rst` (`ncpflash --enter pins`, the default) | R560 |
-| EFR32MG12 (Series 1), R730 generation | `dual-ncp-gsdk4.4.0-efr32mg12.gbl` (generated for `brd4162a`, application at 0x0) | none in hardware: asked from the running firmware, `ncpflash --enter ezsp` from an EZSP Zigbee image, or `cpcd --enter-bootloader` then `ncpflash --enter none` from this firmware | R730 |
+| EFR32MG12 (Series 1), R730 generation | `dual-ncp-gsdk4.4.0-efr32mg12.gbl` (generated for `brd4162a`, application at 0x0) | none in hardware: asked from the running firmware, `ncpflash --enter ezsp` from an EZSP Zigbee image, `cpcd --enter-bootloader` then `ncpflash --enter none` from this firmware, or `ncpflash --enter spinel` from the Thread image | R730 |
+
+The Thread images (`ot-rcp-…`) are built for the same boards with the same changes and reach the
+bootloader the same ways; from a running Thread image without boot-select lines, `ncpflash --enter
+spinel` sends Spinel `RESET_BOOTLOADER`. A Series 1 bootloader may start the application with the
+watchdog running; the Zigbee stack feeds it and the Thread images switch it off.
 
 The EFR32BG21 is Bluetooth-only silicon and cannot run Zigbee.
 
@@ -69,7 +78,10 @@ scripts/setup-tools.sh       # pinned slc-cli, Java 21, Python pack, Arm GNU 12.
 make -C ap test              # ASH codec unit test
 scripts/build-firmware.sh mg21   # -> out/firmware/dual-ncp-gsdk4.4.0-efr32mg21.gbl
 scripts/build-firmware.sh mg12   # -> out/firmware/dual-ncp-gsdk4.4.0-efr32mg12.gbl
+scripts/build-thread.sh mg21 ot-rcp   # -> out/firmware/ot-rcp-gsdk4.4.0-efr32mg21.gbl
+scripts/build-thread.sh mg12 ot-rcp   # -> out/firmware/ot-rcp-gsdk4.4.0-efr32mg12.gbl
 scripts/build-ap.sh          # -> out/ap/
+scripts/build-otbr.sh        # -> out/otbr/ (otbr-agent, ot-ctl, mdnsd for running the border router on the AP)
 ```
 
 The Gecko SDK submodule is large (several GB with its Git LFS content). `setup-tools.sh` checks
@@ -83,7 +95,15 @@ for the EFR32MG21, `brd4162a` for the EFR32MG12), switches its low-frequency clo
 internal LFRCO (the AP radio modules have no 32.768 kHz crystal), turns CPC link encryption off,
 reports its build as the CPC application version (`cpcd` logs it), and for the EFR32MG12 also
 puts the DCDC converter in bypass and switches off the dev kit's SWO, packet-trace, SPI flash and
-VCOM pins. It is packaged as a GBL at its link address.
+VCOM pins. It is packaged as a GBL at its link address. `scripts/build-thread.sh` does the same
+for GSDK 4.4.0's `ot-rcp` sample, with OpenThread's platform bootloader mode on; `ot-cli-ftd` (a
+Thread node with the OpenThread command line on the UART) builds the same way for testing. `scripts/build-otbr.sh` builds
+otbr-agent and ot-ctl for the AP itself from the GSDK's own ot-br-posix: AP kernels have no tun driver, so
+`otbr/0001-posix-netif-dummy-interface-without-tun.patch` gives the Thread interface a dummy-interface fallback, or an
+empty bridge on the 4.4 kernels, which have no dummy interfaces either (a packet socket reads what the kernel routes
+into it, a raw IPv6 socket sends Thread's packets out). It also builds Apple's mDNSResponder (ot-br-posix's pinned
+version and patches) as `mdnsd`, with `otbr/0002-mdnsresponder-interface-allow-list.patch` so it answers only on the
+interfaces in `MDNSD_INTERFACES` and never announces the AP's internal 169.254 addresses.
 
 ## Installing on an AP
 
@@ -92,9 +112,9 @@ you control:
 
 | File | Destination |
 |---|---|
-| `cpcd`, `iotd`, `ncpflash`, `ezsp_probe`, `start.sh`, `cpcd.conf` | `/writable/data/bin/` |
+| `cpcd`, `iotd`, `ncpflash`, `ezsp_probe`, `spinel_probe`, `start.sh`, `cpcd.conf` | `/writable/data/bin/` |
 | `iotd.conf.example` | `/writable/data/iotd.conf` |
-| the image for your radio, `dual-ncp-gsdk4.4.0-efr32mg21.gbl` or `…-efr32mg12.gbl` | `/writable/data/` |
+| the image for your radio, `dual-ncp-gsdk4.4.0-efr32mg21.gbl` or `…-efr32mg12.gbl` (or `ot-rcp-…` for Thread) | `/writable/data/` |
 
 Then, in a root shell on the AP:
 
@@ -135,6 +155,11 @@ process. It reflashes its own radio image within a couple of minutes.
   coordinator, or use `zigbee_connect` behind a controller that relays it.
 * **Bluetooth**: connect to TCP 6639 and read one JSON object per line per advertisement, or set
   `ble_connect` and accept the stream.
+* **Thread**: flash the `ot-rcp-…` image, set `thread = yes` (Zigbee and Bluetooth are off then) and
+  `thread_allow` to the border router's address. On the border router's host, present the radio as
+  a serial device and point otbr-agent at it:
+  `socat pty,raw,echo=0,link=/dev/ttyOT0 tcp:<ap-address>:6640` and
+  `otbr-agent -I wpan0 -B eth0 'spinel+hdlc+uart:///dev/ttyOT0?uart-baudrate=115200'`.
 
 Interfaces, configuration and behaviour are described in [`ap/README.md`](ap/README.md).
 

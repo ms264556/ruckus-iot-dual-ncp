@@ -8,6 +8,7 @@ NCP on CPC endpoint 5, one UART through `cpcd`) into these services:
 | **6638** | EZSP in ASH framing, the same protocol a serial EZSP coordinator speaks | Home Assistant ZHA (bellows), zigbee2mqtt (`ember`), other EZSP hosts; limited to `zigbee_allow`, or reached through one outbound stream instead (`zigbee_connect`) |
 | **6639** | Bluetooth advertisements, newline-delimited JSON | any client; or streamed out to one address instead (`ble_connect`) |
 | **6053** | An ESPHome Bluetooth proxy: the ESPHome native API with Noise encryption, announced over mDNS (`api_port`) | Home Assistant's ESPHome integration, as for an ESPHome device with `api: encryption: key:` |
+| **6640** | Thread mode only (`thread = yes`, the radio running the `ot-rcp` image): the radio's UART, Spinel in HDLC-lite framing, relayed byte for byte | one Thread border router (otbr-agent through socat); limited to `thread_allow`, or reached through one outbound stream instead (`thread_connect`) |
 
 It also supervises `cpcd` and reconnects when the radio or `cpcd` restarts. It is one static
 ARMv7 binary with no dependencies beyond the statically linked `libcpc`.
@@ -19,6 +20,7 @@ ARMv7 binary with no dependencies beyond the statically linked `libcpc`.
 | `iotd/` | the daemon |
 | `tools/ncpflash.c` | radio flasher (Gecko bootloader, XMODEM-CRC) |
 | `tools/ezsp_probe.c` | direct EZSP check through `cpcd` |
+| `tools/spinel_probe.c` | direct Spinel check of the Thread image (version, EUI-64) |
 | `start.sh` | stops the vendor IoT gateway and starts `iotd` |
 | `cpcd.conf` | `cpcd` configuration for the radio's UART |
 | `iotd.conf.example` | `iotd` configuration |
@@ -59,8 +61,34 @@ that arrive on it (a host's ASH RST) make the other end the Zigbee client, exact
 connection to 6638 would (the NCP is reset for it). When that host's session ends, `iotd` opens a
 fresh connection after 1 s. With `zigbee_port = 0` as well, the AP has no Zigbee listener.
 
-Every outbound connection starts with one hello line, `iotd ble 1` or `iotd zigbee 1`, so both
-streams can share one destination and the receiving end knows which is which.
+Every outbound connection starts with one hello line, `iotd ble 1`, `iotd zigbee 1` or `iotd thread 1`,
+so the streams can share one destination and the receiving end knows which is which.
+
+Thread mode replaces all of the above when the radio runs the Thread image:
+
+```
+thread = no               # yes: no cpcd, ble or zigbee; the radio's UART is relayed instead
+thread_uart = /dev/ttyMSM1
+thread_port = 6640        # 0: no listener
+thread_allow =            # IPv4 addresses or networks the listener accepts; empty: anyone
+thread_connect =          # a.b.c.d:port to connect out to and serve one host on; empty: none
+```
+
+With `thread_border_router = yes` the border router runs on the AP instead of the relay: `iotd` starts
+`otbr-agent` (from `scripts/build-otbr.sh`, `otbr = /writable/data/bin/otbr-agent`) on `thread_uart` with
+`thread_infra` (default `br0`) as its infrastructure link, restarts it when it exits, turns IPv6 forwarding on (and
+`accept_ra = 2` on the bridge) while it runs and puts the old values back when it stops. otbr-agent's output is in
+`/tmp/otbr-agent.log`, the Thread network's settings in `/writable/data/thread`; its REST API (TCP 8081) is what Home
+Assistant's OpenThread Border Router integration takes. `ot-ctl` talks to it on the AP. `iotd` also runs `mdnsd`
+(`mdnsd = /writable/data/bin/mdnsd`, socket `/var/run/otbr-mdnsd`, answering only on `thread_infra`) for the border
+agent and the services Thread devices register over SRP, and restarts otbr-agent with it, since otbr-agent never
+re-registers with a new responder. If the bridge has no IPv6 link-local address (3.6.2 strips it) `iotd` adds the
+EUI-64 one while the border router runs, or otbr's routing manager never starts. Proven on SmartZone 7.2, 6.1.2, 6.1.0,
+5.2.2 and 3.6.2 AP firmware.
+
+In relay mode `iotd` opens the UART at 115200 with RTS/CTS and passes bytes both ways between it and one client,
+without looking at them; what the radio sends while no client is connected is dropped. The border
+router resets the RCP itself when it starts. `thread_connect` works as `zigbee_connect` does.
 
 The ESPHome Bluetooth proxy is off unless `api_port` is set:
 

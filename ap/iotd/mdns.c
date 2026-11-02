@@ -370,7 +370,7 @@ static bool list_prerouting(char *out, size_t cap)
     return access(NFT, X_OK) == 0 && run_capture(NFT " -a list chain inet mangle prerouting 2>/dev/null", out, cap);
 }
 
-static void firewall_check(uint64_t now)
+void mdns_firewall_check(uint64_t now)
 {
     if (firewall_checked_at && now - firewall_checked_at < FIREWALL_CHECK_MS) {
         return;
@@ -396,7 +396,7 @@ static void firewall_check(uint64_t now)
     }
 }
 
-static void firewall_remove(void)
+void mdns_firewall_remove(void)
 {
     if (!firewall_rule_added) {
         return;
@@ -464,7 +464,7 @@ void mdns_tick(uint64_t now)
     if (!M.on) {
         return;
     }
-    firewall_check(now);
+    mdns_firewall_check(now);
     if (now < M.addr_checked_at + 10000 && M.addr_checked_at) {
         goto announce_due;
     }
@@ -525,7 +525,7 @@ void mdns_shutdown(void)
     if (M.addr) {
         announce(true);
     }
-    firewall_remove();
+    mdns_firewall_remove();
     close(M.fd);
     M.fd = -1;
     M.on = false;

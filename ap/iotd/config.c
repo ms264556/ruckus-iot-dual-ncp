@@ -17,6 +17,11 @@ void config_defaults(struct config *c)
     snprintf(c->cpcd_path, sizeof(c->cpcd_path), "/writable/data/bin/cpcd");
     snprintf(c->cpcd_conf, sizeof(c->cpcd_conf), "/writable/data/bin/cpcd.conf");
     c->api_mdns = true;
+    snprintf(c->thread_uart, sizeof(c->thread_uart), "/dev/ttyMSM1");
+    c->thread_port = 6640;
+    snprintf(c->thread_infra, sizeof(c->thread_infra), "br0");
+    snprintf(c->otbr_path, sizeof(c->otbr_path), "/writable/data/bin/otbr-agent");
+    snprintf(c->mdnsd_path, sizeof(c->mdnsd_path), "/writable/data/bin/mdnsd");
 }
 
 /* Standard base64 of exactly out_len bytes; false for anything else. */
@@ -171,6 +176,43 @@ int config_load(struct config *c, const char *path)
             }
         } else if (!strcmp(key, "api_mdns")) {
             bad = parse_bool(val, &c->api_mdns);
+        } else if (!strcmp(key, "thread")) {
+            bad = parse_bool(val, &c->thread_enabled);
+        } else if (!strcmp(key, "thread_uart")) {
+            bad = strncmp(val, "/dev/", 5) != 0;
+            if (!bad) {
+                snprintf(c->thread_uart, sizeof(c->thread_uart), "%s", val);
+            }
+        } else if (!strcmp(key, "thread_port")) {
+            if (!strcmp(val, "0")) {
+                c->thread_port = 0; /* no listener */
+            } else {
+                bad = parse_port(val, &c->thread_port);
+            }
+        } else if (!strcmp(key, "thread_connect")) {
+            uint32_t addr;
+            int port;
+            bad = *val && !net_parse_ip_port(val, &addr, &port);
+            if (!bad) {
+                snprintf(c->thread_connect, sizeof(c->thread_connect), "%s", val);
+            }
+        } else if (!strcmp(key, "thread_border_router")) {
+            bad = parse_bool(val, &c->thread_border_router);
+        } else if (!strcmp(key, "thread_infra")) {
+            bad = !*val || strlen(val) >= sizeof(c->thread_infra) || strchr(val, '/') != NULL;
+            if (!bad) {
+                snprintf(c->thread_infra, sizeof(c->thread_infra), "%s", val);
+            }
+        } else if (!strcmp(key, "otbr")) {
+            snprintf(c->otbr_path, sizeof(c->otbr_path), "%s", val);
+        } else if (!strcmp(key, "mdnsd")) {
+            snprintf(c->mdnsd_path, sizeof(c->mdnsd_path), "%s", val);
+        } else if (!strcmp(key, "thread_allow")) {
+            struct allow a;
+            bad = !allow_parse(&a, val);
+            if (!bad) {
+                c->thread_allow = a;
+            }
         } else if (!strcmp(key, "cpcd")) {
             snprintf(c->cpcd_path, sizeof(c->cpcd_path), "%s", val);
         } else if (!strcmp(key, "cpcd_conf")) {

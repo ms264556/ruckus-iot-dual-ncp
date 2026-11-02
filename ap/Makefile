@@ -14,16 +14,19 @@ CFLAGS       ?= -O2 -Wall -Wextra -Wno-unused-parameter
 EXTRA_CFLAGS ?=
 
 IOTD_SRCS = iotd/main.c iotd/log.c iotd/config.c iotd/net.c iotd/cpcd.c iotd/link.c \
-            iotd/ble.c iotd/zb.c iotd/ash_codec.c iotd/crypto.c iotd/api.c iotd/mdns.c
+            iotd/ble.c iotd/zb.c iotd/thread.c iotd/otbr.c iotd/ash_codec.c iotd/crypto.c iotd/api.c iotd/mdns.c
 IOTD_HDRS = iotd/iotd.h iotd/ash_codec.h iotd/crypto.h
 
-all: iotd/iotd tools/ncpflash tools/ezsp_probe
+all: iotd/iotd tools/ncpflash tools/ezsp_probe tools/spinel_probe
 
 iotd/iotd: $(IOTD_SRCS) $(IOTD_HDRS)
 	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -I$(CPC_INC) -o $@ $(IOTD_SRCS) $(CPC_LIB) -lpthread
 
 tools/ncpflash: tools/ncpflash.c iotd/ash_codec.c iotd/ash_codec.h
 	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -Iiotd -o $@ tools/ncpflash.c iotd/ash_codec.c
+
+tools/spinel_probe: tools/spinel_probe.c
+	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -o $@ $<
 
 tools/ezsp_probe: tools/ezsp_probe.c
 	$(CC) -static $(CFLAGS) $(EXTRA_CFLAGS) -I$(CPC_INC) -o $@ $< $(CPC_LIB) -lpthread
@@ -43,6 +46,6 @@ test/api_harness: test/api_harness.c iotd/api.c iotd/mdns.c iotd/crypto.c iotd/n
 	$(HOSTCC) $(CFLAGS) -Iiotd -I$(CPC_INC) -o $@ test/api_harness.c iotd/api.c iotd/mdns.c iotd/crypto.c iotd/net.c iotd/log.c iotd/config.c
 
 clean:
-	rm -f iotd/iotd tools/ncpflash tools/ezsp_probe test/ash_codec_test test/crypto_vectors test/api_harness
+	rm -f iotd/iotd tools/ncpflash tools/ezsp_probe tools/spinel_probe test/ash_codec_test test/crypto_vectors test/api_harness
 
 .PHONY: all test clean

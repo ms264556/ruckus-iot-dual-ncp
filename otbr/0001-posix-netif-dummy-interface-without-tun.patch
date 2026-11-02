@@ -1,0 +1,256 @@
+--- a/src/posix/platform/netif.cpp
++++ b/src/posix/platform/netif.cpp
+@@ -73,7 +73,9 @@
+ #include <ifaddrs.h>
+ #ifdef __linux__
+ #include <linux/if_link.h>
++#include <linux/if_packet.h>
+ #include <linux/if_tun.h>
++#include <linux/if_ether.h>
+ #include <linux/netlink.h>
+ #include <linux/rtnetlink.h>
+ #endif // __linux__
+@@ -247,6 +249,14 @@
+ #endif
+ 
+ static int sTunFd     = -1; ///< Used to exchange IPv6 packets.
++
++#if defined(__linux__)
++// Kernels without a tun driver (Ruckus AP firmware): the Thread interface is a dummy interface instead. What the kernel
++// routes into it is read from a cooked packet socket bound to it (sTunFd, outgoing packets only); packets from Thread
++// go to the kernel through a raw IPv6 socket, which routes them as if this host sent them.
++static int  sRawFd      = -1;
++static bool sDummyNetif = false;
++#endif
+ static int sIpFd      = -1; ///< Used to manage IPv6 stack on Thread interface.
+ static int sNetlinkFd = -1; ///< Used to receive netlink events.
+ #if OPENTHREAD_POSIX_USE_MLD_MONITOR
+@@ -958,6 +968,36 @@
+ #endif
+ }
+ 
++#if defined(__linux__)
++/**
++ * A packet from Thread, through the raw socket: routed by the kernel as locally sent, so it goes out of the
++ * infrastructure link or, for one of this host's own addresses, is delivered locally. Link- and interface-scope
++ * unicast and all multicast belong to the Thread interface itself, which a raw socket cannot deliver as received
++ * there, so they are dropped.
++ */
++static otError sendToHost(const uint8_t *aPacket, uint16_t aLength)
++{
++    otError             error = OT_ERROR_NONE;
++    struct sockaddr_in6 dst;
++    const uint8_t      *dstAddr = aPacket + 24;
++
++    VerifyOrExit(aLength >= 40 && (aPacket[0] >> 4) == 6, error = OT_ERROR_PARSE);
++    VerifyOrExit(dstAddr[0] != 0xff && !(dstAddr[0] == 0xfe && (dstAddr[1] & 0xc0) == 0x80));
++
++    memset(&dst, 0, sizeof(dst));
++    dst.sin6_family = AF_INET6;
++    memcpy(&dst.sin6_addr, dstAddr, sizeof(dst.sin6_addr));
++    if (sendto(sRawFd, aPacket, aLength, 0, reinterpret_cast<struct sockaddr *>(&dst), sizeof(dst)) != aLength)
++    {
++        otLogDebgPlat("[netif] raw send: %s", strerror(errno));
++        error = OT_ERROR_FAILED;
++    }
++
++exit:
++    return error;
++}
++#endif
++
+ static void processReceive(otMessage *aMessage, void *aContext)
+ {
+     OT_UNUSED_VARIABLE(aContext);
+@@ -992,6 +1032,14 @@
+     length += 4;
+ #endif
+ 
++#if defined(__linux__)
++    if (sDummyNetif)
++    {
++        error = sendToHost(reinterpret_cast<const uint8_t *>(&packet[offset]), length);
++        ExitNow();
++    }
++#endif
++
+     VerifyOrExit(write(sTunFd, packet, length) == length, perror("write"); error = OT_ERROR_FAILED);
+ 
+ exit:
+@@ -1081,7 +1129,21 @@
+ 
+     assert(gInstance == aInstance);
+ 
+-    rval = read(sTunFd, packet, sizeof(packet));
++#if defined(__linux__)
++    if (sDummyNetif)
++    {
++        struct sockaddr_ll from;
++        socklen_t          fromLen = sizeof(from);
++
++        rval = recvfrom(sTunFd, packet, sizeof(packet), 0, reinterpret_cast<struct sockaddr *>(&from), &fromLen);
++        // Only IPv6 that the kernel sends into the interface is Thread-bound.
++        VerifyOrExit(rval <= 0 || (from.sll_pkttype == PACKET_OUTGOING && from.sll_protocol == htons(ETH_P_IPV6)));
++    }
++    else
++#endif
++    {
++        rval = read(sTunFd, packet, sizeof(packet));
++    }
+     VerifyOrExit(rval > 0, error = OT_ERROR_FAILED);
+ 
+ #if defined(__APPLE__) || defined(__NetBSD__) || defined(__FreeBSD__)
+@@ -1839,6 +1901,125 @@
+     }
+ }
+ 
++/** Creates the interface aName of aKind over netlink (RTM_NEWLINK); 0, or the negative errno the kernel answered. */
++static int createLink(const char *aName, const char *aKind)
++{
++    struct
++    {
++        struct nlmsghdr  nh;
++        struct ifinfomsg ifi;
++        char             buf[128];
++    } req;
++    struct rtattr *linkInfo;
++    char           ack[256];
++    int            fd;
++    int            code;
++
++    memset(&req, 0, sizeof(req));
++    req.nh.nlmsg_len    = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++    req.nh.nlmsg_type   = RTM_NEWLINK;
++    req.nh.nlmsg_flags  = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK;
++    req.ifi.ifi_family  = AF_UNSPEC;
++    AddRtAttr(&req.nh, sizeof(req), IFLA_IFNAME, aName, static_cast<uint8_t>(strlen(aName) + 1));
++    linkInfo = AddRtAttr(&req.nh, sizeof(req), IFLA_LINKINFO, nullptr, 0);
++    AddRtAttr(&req.nh, sizeof(req), IFLA_INFO_KIND, aKind, static_cast<uint8_t>(strlen(aKind) + 1));
++    linkInfo->rta_len = static_cast<unsigned short>(reinterpret_cast<char *>(&req.nh) + req.nh.nlmsg_len -
++                                                    reinterpret_cast<char *>(linkInfo));
++
++    fd = SocketWithCloseExec(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE, kSocketBlock);
++    VerifyOrDie(fd >= 0, OT_EXIT_ERROR_ERRNO);
++    VerifyOrDie(send(fd, &req, req.nh.nlmsg_len, 0) == static_cast<ssize_t>(req.nh.nlmsg_len), OT_EXIT_ERROR_ERRNO);
++    code = 0;
++    if (recv(fd, ack, sizeof(ack), 0) > 0)
++    {
++        const struct nlmsghdr *nh = reinterpret_cast<const struct nlmsghdr *>(ack);
++        if (nh->nlmsg_type == NLMSG_ERROR)
++        {
++            code = reinterpret_cast<const struct nlmsgerr *>(NLMSG_DATA(nh))->error;
++        }
++    }
++    close(fd);
++    return code;
++}
++
++/**
++ * The Thread interface without tun: a dummy interface, or, on kernels built without dummy interfaces (the Ruckus 6.1.0
++ * and older AP firmware), an empty bridge, which every AP kernel has. Neither sends packets anywhere; the packet socket
++ * sees what the kernel routes into either. A bridge resolves neighbours, so ARP/ND is switched off on it (IFF_NOARP,
++ * as a dummy interface has it).
++ */
++static void createThreadLink(const char *aName)
++{
++    int          code = createLink(aName, "dummy");
++    struct ifreq ifr;
++
++    if (code == 0)
++    {
++        return;
++    }
++    otLogNotePlat("[netif] No dummy interfaces (%s): %s is an empty bridge instead", strerror(-code), aName);
++    code = createLink(aName, "bridge");
++    if (code != 0)
++    {
++        otLogCritPlat("[netif] Creating %s: %s", aName, strerror(-code));
++        DieNow(OT_EXIT_FAILURE);
++    }
++    memset(&ifr, 0, sizeof(ifr));
++    strncpy(ifr.ifr_name, aName, IFNAMSIZ - 1);
++    VerifyOrDie(ioctl(sIpFd, SIOCGIFFLAGS, &ifr) == 0, OT_EXIT_ERROR_ERRNO);
++    ifr.ifr_flags |= IFF_NOARP;
++    VerifyOrDie(ioctl(sIpFd, SIOCSIFFLAGS, &ifr) == 0, OT_EXIT_ERROR_ERRNO);
++}
++
++/** No tun driver: the Thread interface is a dummy interface (or an empty bridge), served by a packet socket and a raw IPv6 socket. */
++static void platformConfigureDummyNetif(otPlatformConfig *aPlatformConfig)
++{
++    struct ifreq       ifr;
++    struct sockaddr_ll sll;
++    const char        *name = aPlatformConfig->mInterfaceName ? aPlatformConfig->mInterfaceName : "wpan0";
++    unsigned int       index;
++
++    VerifyOrDie(strlen(name) < IFNAMSIZ, OT_EXIT_INVALID_ARGUMENTS);
++    strncpy(gNetifName, name, sizeof(gNetifName));
++    if (if_nametoindex(name) == 0)
++    {
++        createThreadLink(name);
++    }
++    index = if_nametoindex(name);
++    VerifyOrDie(index != 0, OT_EXIT_ERROR_ERRNO);
++
++    // Firmware that creates interfaces with IPv6 disabled (net.ipv6.conf.default.disable_ipv6 = 1) would refuse the
++    // Thread addresses and never send into the interface.
++    {
++        char path[96];
++        int  fd;
++
++        snprintf(path, sizeof(path), "/proc/sys/net/ipv6/conf/%s/disable_ipv6", name);
++        fd = open(path, O_WRONLY | O_CLOEXEC);
++        VerifyOrDie(fd >= 0 && write(fd, "0", 1) == 1, OT_EXIT_ERROR_ERRNO);
++        close(fd);
++    }
++
++    // Outgoing packets reach only packet sockets of every protocol (ETH_P_ALL); processTransmit() keeps IPv6.
++    sTunFd = SocketWithCloseExec(AF_PACKET, SOCK_DGRAM, htons(ETH_P_ALL), kSocketNonBlock);
++    VerifyOrDie(sTunFd >= 0, OT_EXIT_ERROR_ERRNO);
++    memset(&sll, 0, sizeof(sll));
++    sll.sll_family   = AF_PACKET;
++    sll.sll_protocol = htons(ETH_P_ALL);
++    sll.sll_ifindex  = static_cast<int>(index);
++    VerifyOrDie(bind(sTunFd, reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll)) == 0, OT_EXIT_ERROR_ERRNO);
++
++    sRawFd = SocketWithCloseExec(AF_INET6, SOCK_RAW, IPPROTO_RAW, kSocketNonBlock);
++    VerifyOrDie(sRawFd >= 0, OT_EXIT_ERROR_ERRNO);
++    sDummyNetif = true;
++
++    memset(&ifr, 0, sizeof(ifr));
++    strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
++    ifr.ifr_mtu = static_cast<int>(kMaxIp6Size);
++    VerifyOrDie(ioctl(sIpFd, SIOCSIFMTU, static_cast<void *>(&ifr)) == 0, OT_EXIT_ERROR_ERRNO);
++    otLogNotePlat("[netif] No tun driver: %s is a stand-in interface (packet socket in, raw IPv6 socket out)", name);
++}
++
+ // set up the tun device
+ static void platformConfigureTunDevice(otPlatformConfig *aPlatformConfig)
+ {
+@@ -1846,7 +2027,12 @@
+     const char  *interfaceName;
+ 
+     sTunFd = open(OPENTHREAD_POSIX_TUN_DEVICE, O_RDWR | O_CLOEXEC | O_NONBLOCK);
+-    VerifyOrDie(sTunFd >= 0, OT_EXIT_ERROR_ERRNO);
++    if (sTunFd < 0)
++    {
++        // A device node without a driver (ENODEV), or none at all.
++        platformConfigureDummyNetif(aPlatformConfig);
++        return;
++    }
+ 
+     memset(&ifr, 0, sizeof(ifr));
+     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+@@ -2104,6 +2290,13 @@
+ 
+ void platformNetifDeinit(void)
+ {
++#if defined(__linux__)
++    if (sRawFd != -1)
++    {
++        close(sRawFd);
++        sRawFd = -1;
++    }
++#endif
+     if (sTunFd != -1)
+     {
+         close(sTunFd);

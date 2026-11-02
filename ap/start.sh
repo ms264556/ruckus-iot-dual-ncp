@@ -8,10 +8,10 @@
 #      stopped, not killed: init respawns it, and when it runs it reflashes the
 #      vendor Bluetooth image onto the NCP within about 1.5 minutes.
 #   2. Kill the vendor gateway processes that hold the IoT radio's UART.
-#   3. Kill any cpcd or iotd left from a previous run (iotd starts its own cpcd).
+#   3. Kill any cpcd, otbr-agent or iotd left from a previous run (iotd starts its own).
 #   4. Run iotd in the background, log in /tmp/iotd.log (tmpfs; /writable is 100 MB).
 #
-# Stop with: killall iotd        (iotd closes the endpoints and stops its cpcd)
+# Stop with: killall iotd        (iotd closes the endpoints and stops its cpcd or otbr-agent)
 # Give the radio back to the vendor gateway: killall iotd; kill -CONT <rksiot_gw_base pid>
 # Busybox: no pgrep/pidof/nohup/timeout here.
 
@@ -25,7 +25,7 @@ done
 killall -9 rksiot_gw rksiot_ble rksiot_zb 2>/dev/null
 killall iotd 2>/dev/null
 sleep 1
-killall -9 iotd cpcd 2>/dev/null
+killall -9 iotd cpcd otbr-agent 2>/dev/null
 sleep 1
 
 echo "starting iotd, log in $LOG"

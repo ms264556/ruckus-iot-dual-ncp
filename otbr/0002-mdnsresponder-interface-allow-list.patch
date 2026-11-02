@@ -1,0 +1,55 @@
+--- a/mDNSPosix/mDNSPosix.c
++++ b/mDNSPosix/mDNSPosix.c
+@@ -1482,6 +1482,31 @@
+ }
+ 
+ // Call get_ifi_info() to obtain a list of active interfaces and call SetupOneInterface() on each one.
++// The border router on a Ruckus AP: answer only on the interfaces in MDNSD_INTERFACES (comma-separated names; unset:
++// all), and never with an IPv4 link-local address (the AP's br0 carries an internal 169.254.x alias).
++mDNSlocal mDNSBool InterfaceWanted(const struct ifaddrs *i)
++{
++    const char *list = getenv("MDNSD_INTERFACES");
++    const char *p;
++    size_t len = strlen(i->ifa_name);
++
++    if (i->ifa_addr->sa_family == AF_INET &&
++        (ntohl(((const struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr) & 0xFFFF0000u) == 0xA9FE0000u)
++        return mDNSfalse;
++    if (list == NULL || *list == 0 || (i->ifa_flags & IFF_LOOPBACK))
++        return mDNStrue;
++    for (p = list; *p; )
++    {
++        const char *end = strchr(p, ',');
++        size_t n = end ? (size_t)(end - p) : strlen(p);
++        if (n == len && strncmp(p, i->ifa_name, n) == 0)
++            return mDNStrue;
++        if (!end) break;
++        p = end + 1;
++    }
++    return mDNSfalse;
++}
++
+ mDNSlocal int SetupInterfaceList(mDNS *const m)
+ {
+     mDNSBool foundav4       = mDNSfalse;
+@@ -1512,8 +1537,9 @@
+                       ) &&  (i->ifa_flags & IFF_UP) && !(i->ifa_flags & IFF_POINTOPOINT))
+             {
+                 int ifIndex = if_nametoindex(i->ifa_name);
+-                if (ifIndex == 0)
++                if (ifIndex == 0 || !InterfaceWanted(i))
+                 {
++                    i = i->ifa_next;
+                     continue;
+                 }
+                 if (i->ifa_flags & IFF_LOOPBACK)
+@@ -1911,7 +1937,8 @@
+ #endif
+                   ) && ((*ifi)->ifa_flags & IFF_UP)
+                     && !((*ifi)->ifa_flags & IFF_POINTOPOINT)
+-                    && !((*ifi)->ifa_flags & IFF_LOOPBACK))
++                    && !((*ifi)->ifa_flags & IFF_LOOPBACK)
++                    && InterfaceWanted(*ifi))
+         {
+             struct ifaddrs *i = *ifi;
+ 

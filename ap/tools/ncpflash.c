@@ -1,6 +1,6 @@
 /* ncpflash: flash a GBL image onto the AP's built-in IoT radio through its Gecko bootloader.
  *
- *   ncpflash [--enter pins|ezsp|none] <file.gbl> [uart]        uart defaults to /dev/ttyMSM1
+ *   ncpflash [--enter pins|ezsp|spinel|none] <file.gbl> [uart]        uart defaults to /dev/ttyMSM1
  *
  * Gets the radio to its bootloader menu, uploads over XMODEM-CRC at 115200, then runs the
  * new application. Nothing else may hold the UART while it runs. A radio already at the
@@ -14,6 +14,8 @@
  *         EZSP image over plain ASH (the factory and vendor Zigbee images). A radio running
  *         a CPC image is sent to its bootloader with cpcd --enter-bootloader instead, then
  *         flashed with --enter none.
+ *   spinel  ask the running OpenThread RCP: Spinel CMD_RESET with RESET_BOOTLOADER in HDLC-lite
+ *         framing, RTS/CTS on (this package's ot-rcp images, built with the platform bootloader mode)
  *   none  the radio must already be at the prompt
  *
  * Only pins touches iot_rcv; ezsp may pulse iot_rst, which restarts the application.
@@ -413,6 +415,42 @@ static int enter_bootloader_ezsp(int fd)
 
 /* ---- XMODEM ----------------------------------------------------------------------- */
 
+/* ---- Spinel: one HDLC-lite frame asking an OpenThread RCP for its bootloader --------------------------------- */
+
+static int enter_bootloader_spinel(int fd)
+{
+    /* header (flag, IID 0, TID 1), CMD_RESET, SPINEL_RESET_BOOTLOADER */
+    const uint8_t payload[] = { 0x81, 0x01, 0x03 };
+    uint16_t fcs = 0xFFFF; /* CRC-16/X.25, sent low byte first */
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        fcs ^= payload[i];
+        for (int b = 0; b < 8; b++) {
+            fcs = (fcs & 1) ? (uint16_t)((fcs >> 1) ^ 0x8408) : (uint16_t)(fcs >> 1);
+        }
+    }
+    fcs ^= 0xFFFF;
+    uint8_t body[sizeof(payload) + 2], out[2 * sizeof(body) + 2];
+    memcpy(body, payload, sizeof(payload));
+    body[sizeof(payload)] = (uint8_t)(fcs & 0xFF);
+    body[sizeof(payload) + 1] = (uint8_t)(fcs >> 8);
+    size_t n = 0;
+    out[n++] = 0x7E;
+    for (size_t i = 0; i < sizeof(body); i++) {
+        uint8_t c = body[i];
+        if (c == 0x7E || c == 0x7D || c == 0x11 || c == 0x13 || c == 0xF8) {
+            out[n++] = 0x7D;
+            c ^= 0x20;
+        }
+        out[n++] = c;
+    }
+    out[n++] = 0x7E;
+    if (!flow_control) {
+        set_flow_control(fd, 1); /* the RCP image runs with hardware flow control */
+    }
+    fprintf(stderr, "spinel: RESET_BOOTLOADER\n");
+    return write(fd, out, n) == (ssize_t)n ? 0 : -1;
+}
+
 static uint16_t crc16(const unsigned char *p, size_t n)
 {
     uint16_t crc = 0;
@@ -511,8 +549,8 @@ int main(int argc, char **argv)
         enter = argv[2];
         arg = 3;
     }
-    if (argc <= arg || (strcmp(enter, "pins") && strcmp(enter, "ezsp") && strcmp(enter, "none"))) {
-        fprintf(stderr, "usage: %s [--enter pins|ezsp|none] <file.gbl> [uart]\n", argv[0]);
+    if (argc <= arg || (strcmp(enter, "pins") && strcmp(enter, "ezsp") && strcmp(enter, "spinel") && strcmp(enter, "none"))) {
+        fprintf(stderr, "usage: %s [--enter pins|ezsp|spinel|none] <file.gbl> [uart]\n", argv[0]);
         return 2;
     }
     const char *image = argv[arg];
@@ -555,6 +593,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "entering bootloader (%s)\n", enter);
         if (pins) {
             enter_bootloader();
+        } else if (strcmp(enter, "spinel") == 0) {
+            if (enter_bootloader_spinel(fd) != 0) {
+                fprintf(stderr, "could not write to the RCP\n");
+                return 1;
+            }
         } else if (enter_bootloader_ezsp(fd) != 0) {
             fprintf(stderr, "could not ask the NCP for its bootloader\n");
             return 1;

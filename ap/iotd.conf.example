@@ -33,6 +33,20 @@ zigbee_port = 6638     # EZSP in ASH framing, as ser2net would present a serial 
 #api_allow = 192.168.1.10
 #api_mdns = yes
 
+# Thread instead of the dual NCP: the radio runs the OpenThread RCP image (ot-rcp-gsdk4.4.0-efr32mg21.gbl),
+# ble, zigbee and cpcd are off, and the radio's UART is relayed byte for byte (Spinel in HDLC-lite framing)
+# to one border-router host, e.g. otbr-agent through socat: pty,raw,echo=0,link=/dev/ttyOT0 tcp:<ap>:6640
+#thread = no
+#thread_uart = /dev/ttyMSM1
+#thread_port = 6640     # 0: no listener
+#thread_allow = 192.168.1.10
+#thread_connect = 127.0.0.1:8883   # outbound stream instead, hello "iotd thread 1"
+# Or the border router itself on this AP instead of the relay: otbr-agent (out/otbr) on thread_uart, with the LAN bridge
+# as its infrastructure link; IPv6 forwarding is on while it runs, its REST API is on TCP 8081.
+#thread_border_router = no
+#thread_infra = br0
+#otbr = /writable/data/bin/otbr-agent
+
 # cpcd binary and its configuration (instance name cpcd_0, the radio's UART, 115200,
 # hardware flow control, encryption disabled, sockets under /tmp/cpcd/cpcd_0).
 cpcd = /writable/data/bin/cpcd

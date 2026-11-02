@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the AP-side programs: cpcd, iotd, ncpflash and ezsp_probe.
+# Build the AP-side programs: cpcd, iotd, ncpflash, ezsp_probe and spinel_probe.
 #
 #   scripts/build-ap.sh
 #
@@ -40,7 +40,7 @@ cmake -S "$CPC_SRC" -B "$CPC_BUILD" \
   >/dev/null
 cmake --build "$CPC_BUILD" -j"$(nproc)" --target cpcd cpc
 
-echo "== iotd, ncpflash, ezsp_probe"
+echo "== iotd, ncpflash, ezsp_probe, spinel_probe"
 make -C "$ROOT/ap" clean
 make -C "$ROOT/ap" -j"$(nproc)" \
   CROSS="$CROSS" \
@@ -51,8 +51,8 @@ make -C "$ROOT/ap" -j"$(nproc)" \
 echo "== collect"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$CPC_BUILD/cpcd" "$ROOT/ap/iotd/iotd" "$ROOT/ap/tools/ncpflash" "$ROOT/ap/tools/ezsp_probe" "$OUT/"
-"${CROSS}strip" "$OUT/cpcd" "$OUT/iotd" "$OUT/ncpflash" "$OUT/ezsp_probe"
+cp "$CPC_BUILD/cpcd" "$ROOT/ap/iotd/iotd" "$ROOT/ap/tools/ncpflash" "$ROOT/ap/tools/ezsp_probe" "$ROOT/ap/tools/spinel_probe" "$OUT/"
+"${CROSS}strip" "$OUT/cpcd" "$OUT/iotd" "$OUT/ncpflash" "$OUT/ezsp_probe" "$OUT/spinel_probe"
 cp "$ROOT/ap/cpcd.conf" "$ROOT/ap/start.sh" "$ROOT/ap/iotd.conf.example" "$OUT/"
 chmod 755 "$OUT/start.sh"
-file "$OUT"/cpcd "$OUT"/iotd "$OUT"/ncpflash "$OUT"/ezsp_probe 2>/dev/null || ls -l "$OUT"
+file "$OUT"/cpcd "$OUT"/iotd "$OUT"/ncpflash "$OUT"/ezsp_probe "$OUT"/spinel_probe 2>/dev/null || ls -l "$OUT"

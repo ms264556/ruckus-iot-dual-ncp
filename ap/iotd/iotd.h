@@ -68,6 +68,19 @@ struct config {
     bool api_mdns;
     char cpcd_path[256];
     char cpcd_conf[256];
+    /* Thread (thread.c): the radio runs the OpenThread RCP image instead of the dual NCP, so ble and zigbee are off
+     * and there is no cpcd; its UART is relayed to one border-router host. */
+    bool thread_enabled;
+    char thread_uart[64];
+    int thread_port;        /* 0: no listener */
+    char thread_connect[64];/* "a.b.c.d:port" iotd connects out to and serves one host on; empty: none */
+    struct allow thread_allow;
+    /* With thread_border_router, the border router runs on this AP (otbr.c): otbr-agent on thread_uart, with
+     * thread_infra as its infrastructure link, instead of the relay. */
+    bool thread_border_router;
+    char thread_infra[16];
+    char otbr_path[256];
+    char mdnsd_path[256];   /* the border router's mDNS responder (border agent, SRP advertising proxy) */
 };
 void config_defaults(struct config *c);
 int config_load(struct config *c, const char *path); /* 0 ok, -1 unreadable */
@@ -170,6 +183,9 @@ void mdns_tick(uint64_t now);
 void mdns_poll_add(struct pollset *ps);
 void mdns_poll_handle(const struct pollset *ps);
 void mdns_shutdown(void);
+/* The gateway firewall's mDNS accept rule (also for the border router's mdnsd): kept while needed, removed after. */
+void mdns_firewall_check(uint64_t now);
+void mdns_firewall_remove(void);
 
 /* ---- zb.c ---- */
 int zb_init(const struct config *c);
@@ -178,5 +194,17 @@ void zb_poll_add(struct pollset *ps);
 void zb_poll_handle(const struct pollset *ps, uint64_t now);
 void zb_link_down(void);
 void zb_shutdown(void);
+
+/* ---- thread.c ---- */
+int thread_init(const struct config *c);
+void thread_tick(uint64_t now);
+void thread_poll_add(struct pollset *ps);
+void thread_poll_handle(const struct pollset *ps, uint64_t now);
+void thread_shutdown(void);
+
+/* ---- otbr.c ---- */
+int otbr_init(const struct config *c);
+void otbr_tick(uint64_t now);
+void otbr_stop(void);
 
 #endif
