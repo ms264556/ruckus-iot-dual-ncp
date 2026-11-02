@@ -44,4 +44,6 @@ tar -C "$OUT" --format=gnu --sort=name --mtime="@$EPOCH" \
 
 # Release images only: the dual NCP and the Thread RCP (an ot-cli-ftd test build stays out).
 cp "$OUT"/firmware/dual-ncp-*.gbl "$OUT"/firmware/ot-rcp-*.gbl "$OUT"/ap/* "$DIST/"
+# The notices and licence texts travel with the binaries (release files are flat, so licenses/ is copied file by file).
+cp "$ROOT/NOTICE.md" "$ROOT/LICENSE" "$ROOT"/licenses/* "$DIST/"
 (cd "$DIST" && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
