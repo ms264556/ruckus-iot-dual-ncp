@@ -35,6 +35,182 @@ static struct {
     unsigned long to_host, to_radio;
 } T;
 
+static void client_drop(const char *why);
+/* ---- the RCP behind cpcd (thread_cpc): CPC endpoint 12 <-> HDLC-lite on the TCP side ----------------------------- */
+#define CPC_EP        12      /* SL_CPC_ENDPOINT_15_4 */
+#define CPC_RX_MIN    4087    /* libcpc refuses smaller read buffers */
+#define HDLC_FLAG     0x7E
+#define HDLC_ESC      0x7D
+#define SPINEL_IID_MASK 0x30
+
+static struct {
+    bool on;
+    int iid;                          /* the RCP's Spinel IID; 0: frames pass unchanged */
+    cpc_endpoint_t ep;
+    int ep_fd;                        /* -1 while closed */
+    bool opening;
+    unsigned ep_generation;
+    uint64_t next_try;
+    unsigned tries;
+    uint8_t rx[CPC_RX_MIN + 64];
+    uint8_t dec[2048];                /* an HDLC frame from the host being unescaped */
+    size_t dec_len;
+    bool esc;
+    uint8_t enc[2 * (CPC_RX_MIN + 64) + 8];
+} C;
+
+static uint16_t hdlc_fcs(const uint8_t *p, size_t n)
+{
+    uint16_t fcs = 0xFFFF; /* CRC-16/X.25 */
+    for (size_t i = 0; i < n; i++) {
+        fcs ^= p[i];
+        for (int b = 0; b < 8; b++) {
+            fcs = (fcs & 1) ? (uint16_t)((fcs >> 1) ^ 0x8408) : (uint16_t)(fcs >> 1);
+        }
+    }
+    return fcs ^ 0xFFFF;
+}
+
+static void cpc_ep_close(const char *why)
+{
+    if (C.ep_fd >= 0) {
+        cpc_close_endpoint(&C.ep);
+        LOGI("thread: endpoint %d closed: %s", CPC_EP, why);
+    }
+    C.ep_fd = -1;
+    C.opening = true;
+    C.next_try = now_ms() + 250;
+}
+
+static void cpc_ep_try_open(uint64_t now)
+{
+    if (!C.opening || !link_up() || now < C.next_try) {
+        return;
+    }
+    int fd = cpc_open_endpoint(link_handle(), &C.ep, CPC_EP, 1);
+    if (fd < 0) {
+        if (++C.tries == 8) {
+            LOGI("thread: endpoint %d not yet open on the RCP (%d), still retrying", CPC_EP, fd);
+        }
+        C.next_try = now + 250;
+        return;
+    }
+    C.ep_fd = fd;
+    C.opening = false;
+    C.ep_generation = link_generation();
+    LOGI("thread: endpoint %d open (fd %d) after %u retries", CPC_EP, fd, C.tries);
+    C.tries = 0;
+}
+
+static void cpc_frame_to_host(uint8_t *f, size_t n);
+
+/* A Spinel frame from the RCP: IID cleared, HDLC-lite framed, to the host. */
+static void cpc_spinel_to_host(uint8_t *f, size_t n)
+{
+    if (n == 0 || T.cl.fd < 0) {
+        return;
+    }
+    if (C.iid) {
+        f[0] = (uint8_t)(f[0] & ~SPINEL_IID_MASK);
+    }
+    uint16_t fcs = hdlc_fcs(f, n);
+    uint8_t tail[2] = { (uint8_t)(fcs & 0xFF), (uint8_t)(fcs >> 8) };
+    size_t o = 0;
+    C.enc[o++] = HDLC_FLAG;
+    for (size_t i = 0; i < n + 2 && o + 3 < sizeof(C.enc); i++) {
+        uint8_t c = i < n ? f[i] : tail[i - n];
+        if (c == HDLC_FLAG || c == HDLC_ESC || c == 0x11 || c == 0x13 || c == 0xF8) {
+            C.enc[o++] = HDLC_ESC;
+            c ^= 0x20;
+        }
+        C.enc[o++] = c;
+    }
+    C.enc[o++] = HDLC_FLAG;
+    T.to_host += (unsigned long)o;
+    if (client_queue(&T.cl, C.enc, o, false) < 0) {
+        client_drop("host not reading");
+    }
+}
+
+static void cpc_ep_read(void)
+{
+    for (int burst = 0; burst < 16 && C.ep_fd >= 0; burst++) {
+        ssize_t n = cpc_read_endpoint(C.ep, C.rx, sizeof(C.rx), CPC_ENDPOINT_READ_FLAG_NON_BLOCKING);
+        if (n < 0) {
+            if (-n == EAGAIN || -n == EWOULDBLOCK) {
+                return;
+            }
+            LOGW("thread: cpc_read_endpoint: %zd%s", n, cpcd_restarting() ? " (cpcd restart in progress)" : "");
+            link_request_down(cpcd_restarting() ? "cpcd restarting" : "thread read failed");
+            cpc_ep_close("read failed");
+            return;
+        }
+        if (n == 0) {
+            return;
+        }
+        cpc_frame_to_host(C.rx, (size_t)n);
+    }
+}
+
+/* A CPC payload from the RCP: Spinel frames concatenated, each behind a big-endian 16-bit length (ncp_cpc.cpp). */
+static void cpc_frame_to_host(uint8_t *f, size_t n)
+{
+    size_t o = 0;
+    while (o + 2 <= n) {
+        size_t len = ((size_t)f[o] << 8) | f[o + 1];
+        o += 2;
+        if (len == 0 || o + len > n) {
+            LOGW("thread: CPC payload of %zu bytes with a %zu-byte frame at %zu dropped", n, len, o - 2);
+            return;
+        }
+        cpc_spinel_to_host(f + o, len);
+        o += len;
+    }
+}
+
+/* Host bytes: HDLC-lite frames unescaped, FCS checked and dropped, IID set, each one a CPC write. */
+static void cpc_host_bytes(const uint8_t *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        uint8_t c = b[i];
+        if (c == HDLC_FLAG) {
+            if (C.dec_len >= 3) {
+                size_t len = C.dec_len - 2;
+                uint16_t fcs = (uint16_t)(C.dec[len] | (C.dec[len + 1] << 8));
+                if (fcs == hdlc_fcs(C.dec, len)) {
+                    if (C.iid) {
+                        C.dec[0] = (uint8_t)((C.dec[0] & ~SPINEL_IID_MASK) | ((C.iid << 4) & SPINEL_IID_MASK));
+                    }
+                    if (C.ep_fd >= 0) {
+                        ssize_t w = cpc_write_endpoint(C.ep, C.dec, len, CPC_ENDPOINT_WRITE_FLAG_NONE);
+                        if (w != (ssize_t)len) {
+                            LOGW("thread: cpc_write_endpoint: %zd", w);
+                            link_request_down("thread write failed");
+                            cpc_ep_close("write failed");
+                        }
+                    }
+                } else {
+                    LOGW("thread: HDLC frame from the host with a bad FCS (%zu bytes) dropped", len);
+                }
+            }
+            C.dec_len = 0;
+            C.esc = false;
+            continue;
+        }
+        if (c == HDLC_ESC) {
+            C.esc = true;
+            continue;
+        }
+        if (C.esc) {
+            c ^= 0x20;
+            C.esc = false;
+        }
+        if (C.dec_len < sizeof(C.dec)) {
+            C.dec[C.dec_len++] = c;
+        }
+    }
+}
+
 static int uart_open(const char *path)
 {
     int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
@@ -101,7 +277,7 @@ static void client_accept(int fd, uint64_t now)
     T.cl.connected_at = now;
     T.to_host = T.to_radio = 0;
     T.out_len = 0;
-    if (T.uart_fd >= 0) {
+    if (!C.on && T.uart_fd >= 0) {
         tcflush(T.uart_fd, TCIFLUSH); /* nothing the radio said before this host belongs to it */
     }
     LOGI("thread: client connected (fd %d)", fd);
@@ -119,6 +295,9 @@ static void client_read(void)
         if (errno != EAGAIN && errno != EINTR) {
             client_drop(strerror(errno));
         }
+    } else if (C.on) {
+        T.to_radio += (unsigned long)r;
+        cpc_host_bytes(T.out + T.out_len, (size_t)r); /* consumed at once; nothing waits for a UART */
     } else {
         T.out_len += (size_t)r;
         T.to_radio += (unsigned long)r;
@@ -174,9 +353,20 @@ int thread_init(const struct config *c)
     T.uart_idx = T.listen_idx = T.cl_idx = T.up_idx = -1;
     T.allow = c->thread_allow;
     uplink_init(&T.up, 256, c->thread_connect, "thread");
-    T.uart_fd = uart_open(T.uart);
-    if (T.uart_fd < 0) {
-        return -1;
+    memset(&C, 0, sizeof(C));
+    C.on = c->thread_cpc;
+    C.iid = c->thread_cpc_iid;
+    C.ep_fd = -1;
+    C.opening = true;
+    T.uart_fd = -1;
+    if (C.on) {
+        snprintf(T.uart, sizeof(T.uart), "cpcd endpoint %d", CPC_EP);
+        LOGI("thread: the RCP is behind cpcd (endpoint %d, Spinel IID %d); HDLC-lite framing on the host side", CPC_EP, C.iid);
+    } else {
+        T.uart_fd = uart_open(T.uart);
+        if (T.uart_fd < 0) {
+            return -1;
+        }
     }
     T.listen_fd = -1;
     if (c->thread_port > 0) {
@@ -198,7 +388,12 @@ int thread_init(const struct config *c)
 
 void thread_tick(uint64_t now)
 {
-    if (T.uart_fd < 0 && now >= T.reopen_at) {
+    if (C.on) {
+        if (C.ep_fd >= 0 && (!link_up() || link_generation() != C.ep_generation)) {
+            cpc_ep_close("cpcd link changed");
+        }
+        cpc_ep_try_open(now);
+    } else if (T.uart_fd < 0 && now >= T.reopen_at) {
         T.uart_fd = uart_open(T.uart);
         if (T.uart_fd < 0) {
             T.reopen_at = now + REOPEN_MS;
@@ -218,7 +413,8 @@ void thread_poll_add(struct pollset *ps)
     T.cl_idx = T.cl.fd >= 0
                    ? pollset_add(ps, T.cl.fd, (T.out_len < sizeof(T.out) ? POLLIN : 0) | (T.cl.len ? POLLOUT : 0))
                    : -1;
-    T.uart_idx = T.uart_fd >= 0 ? pollset_add(ps, T.uart_fd, POLLIN | (T.out_len ? POLLOUT : 0)) : -1;
+    T.uart_idx = C.on ? (C.ep_fd >= 0 ? pollset_add(ps, C.ep_fd, POLLIN) : -1)
+                      : T.uart_fd >= 0 ? pollset_add(ps, T.uart_fd, POLLIN | (T.out_len ? POLLOUT : 0)) : -1;
 }
 
 void thread_poll_handle(const struct pollset *ps, uint64_t now)
@@ -270,6 +466,16 @@ void thread_poll_handle(const struct pollset *ps, uint64_t now)
         client_drop("write error");
     }
     short ue = pollset_revents(ps, T.uart_idx);
+    if (C.on) {
+        if (C.ep_fd >= 0 && (ue & POLLIN)) {
+            cpc_ep_read();
+        }
+        if (C.ep_fd >= 0 && (ue & (POLLERR | POLLHUP))) {
+            link_request_down("thread endpoint error");
+            cpc_ep_close("error");
+        }
+        return;
+    }
     if (T.uart_fd >= 0 && (ue & POLLIN)) {
         uart_read(now);
     }
@@ -284,6 +490,10 @@ void thread_poll_handle(const struct pollset *ps, uint64_t now)
 void thread_shutdown(void)
 {
     client_drop("shutdown");
+    if (C.on) {
+        cpc_ep_close("shutdown");
+        C.opening = false;
+    }
     client_close(&T.up.c);
     if (T.listen_fd >= 0) {
         close(T.listen_fd);

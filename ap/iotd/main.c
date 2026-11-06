@@ -21,15 +21,27 @@ static void on_signal(int sig)
 static int run_border_router(const struct config *cfg)
 {
     LOGI("thread mode: border router on this AP, %s, infrastructure %s (ble and zigbee off)", cfg->thread_uart, cfg->thread_infra);
+    if (cfg->thread_cpc) {
+        cpcd_configure(cfg); /* the RCP sits behind cpcd: iotd supervises it, otbr-agent connects to its socket */
+    }
     if (otbr_init(cfg) < 0) {
         return 1;
     }
     while (!stop_flag) {
-        otbr_tick(now_ms());
+        uint64_t now = now_ms();
+        if (cfg->thread_cpc) {
+            cpcd_tick(now);
+            link_tick(now);
+        }
+        otbr_tick(now);
         usleep(200 * 1000);
     }
     LOGI("shutting down");
     otbr_stop();
+    if (cfg->thread_cpc) {
+        link_shutdown();
+        cpcd_stop();
+    }
     LOGI("stopped");
     return 0;
 }
@@ -41,11 +53,18 @@ static int run_thread(const struct config *cfg)
     }
     LOGI("thread mode: %s relayed on port %d, %d allowed, connect %s (ble and zigbee off)", cfg->thread_uart,
          cfg->thread_port, cfg->thread_allow.n, cfg->thread_connect[0] ? cfg->thread_connect : "none");
+    if (cfg->thread_cpc) {
+        cpcd_configure(cfg);
+    }
     if (thread_init(cfg) < 0) {
         return 1;
     }
     struct pollset ps;
     while (!stop_flag) {
+        if (cfg->thread_cpc) {
+            cpcd_tick(now_ms());
+            link_tick(now_ms());
+        }
         thread_tick(now_ms());
         pollset_reset(&ps);
         thread_poll_add(&ps);
@@ -60,6 +79,10 @@ static int run_thread(const struct config *cfg)
     }
     LOGI("shutting down");
     thread_shutdown();
+    if (cfg->thread_cpc) {
+        link_shutdown();
+        cpcd_stop();
+    }
     LOGI("stopped");
     return 0;
 }

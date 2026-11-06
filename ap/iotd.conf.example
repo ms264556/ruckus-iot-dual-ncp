@@ -38,6 +38,10 @@ zigbee_port = 6638     # EZSP in ASH framing, as ser2net would present a serial 
 # to one border-router host, e.g. otbr-agent through socat: pty,raw,echo=0,link=/dev/ttyOT0 tcp:<ap>:6640
 #thread = no
 #thread_uart = /dev/ttyMSM1
+# A radio on SPI runs the ot-rcp image behind cpcd instead (CPC endpoint 12): the relay frames its Spinel in HDLC-lite
+# and rewrites the IID (host 0, RCP thread_cpc_iid), the border router takes spinel+cpc://; cpcd runs in both modes.
+#thread_cpc = no
+#thread_cpc_iid = 1
 #thread_port = 6640     # 0: no listener
 #thread_allow = 192.168.1.10
 #thread_connect = 127.0.0.1:8883   # outbound stream instead, hello "iotd thread 1"
@@ -51,3 +55,11 @@ zigbee_port = 6638     # EZSP in ASH framing, as ser2net would present a serial 
 # hardware flow control, encryption disabled, sockets under /tmp/cpcd/cpcd_0).
 cpcd = /writable/data/bin/cpcd
 cpcd_conf = /writable/data/bin/cpcd.conf
+
+# The radio's reset line, pulsed low before cpcd starts (a /proc/v54bsp entry or a sysfs gpio value file; none to skip),
+# and, where the bootloader's GPIO-activation pin is wired to the host, the line driven 1 before every reset so the
+# radio boots its application. Defaults: /proc/v54bsp/iot_rst and none. The R650's MG21 on SPI needs
+# radio_reset = /sys/class/gpio/gpio21/value and radio_boot_select = /sys/class/gpio/gpio54/value (both exported,
+# direction out, by the installer; /proc/v54bsp/iot_rst is its Bluetooth-only BG21 there).
+#radio_reset = /proc/v54bsp/iot_rst
+#radio_boot_select = none

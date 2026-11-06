@@ -48,7 +48,7 @@ def sub_define(path: pathlib.Path, name: str, value: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) not in (5, 6) or sys.argv[2] not in ("mg21", "mg12") or sys.argv[5:] not in ([], ["ncp"], ["thread"]):
+    if len(sys.argv) not in (5, 6) or sys.argv[2] not in ("mg21", "mg12", "mg21spi") or sys.argv[5:] not in ([], ["ncp"], ["thread"]):
         print(__doc__, file=sys.stderr)
         return 2
     root = pathlib.Path(sys.argv[1])
@@ -83,6 +83,17 @@ def main() -> int:
             raise SystemExit(f"error: empty app_init() not found in {main_c}")
         main_c.write_text(src)
     print(f"{'app.c' if thread else 'main.c'}: app_init() calls ncp_app_hooks_init()")
+
+    if target == "mg21spi":
+        # The CPC SPI secondary driver names its pins from the primary's side: TX is the host's MOSI (an input on the
+        # radio), RX the host's MISO. The R650 wires the host's MOSI to PC1 and MISO to PC0 (the reverse of the
+        # brd4180b EXP header), and its HOST_INT line to PA4 (the MGM210L module layout).
+        cfg = root / "config" / "sl_cpc_drv_secondary_spi_usart_exp_config.h"
+        sub_define(cfg, "SL_CPC_DRV_SPI_EXP_TX_PIN", "1")
+        sub_define(cfg, "SL_CPC_DRV_SPI_EXP_RX_PIN", "0")
+        sub_define(cfg, "SL_CPC_DRV_SPI_EXP_RX_IRQ_PORT", "gpioPortA")
+        sub_define(cfg, "SL_CPC_DRV_SPI_EXP_RX_IRQ_PIN", "4")
+        print(f"{cfg.name}: TX PC1 (host MOSI), RX PC0 (host MISO), IRQ PA4 for the R650")
 
     if thread:
         mak = next(root.glob("*.project.mak"))

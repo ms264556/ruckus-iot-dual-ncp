@@ -68,10 +68,16 @@ struct config {
     bool api_mdns;
     char cpcd_path[256];
     char cpcd_conf[256];
+    char radio_reset[128];
+    char radio_boot_select[128];
     /* Thread (thread.c): the radio runs the OpenThread RCP image instead of the dual NCP, so ble and zigbee are off
      * and there is no cpcd; its UART is relayed to one border-router host. */
     bool thread_enabled;
     char thread_uart[64];
+    /* The RCP behind cpcd (CPC endpoint 12 on the ot-rcp image for a radio on SPI) instead of on thread_uart; the
+     * Spinel IID that RCP serves (0: none), rewritten by the relay and given to otbr-agent. */
+    bool thread_cpc;
+    int thread_cpc_iid;
     int thread_port;        /* 0: no listener */
     char thread_connect[64];/* "a.b.c.d:port" iotd connects out to and serves one host on; empty: none */
     struct allow thread_allow;

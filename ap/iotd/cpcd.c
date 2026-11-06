@@ -16,6 +16,8 @@
 
 static char cpcd_path[256];
 static char cpcd_conf[256];
+static char radio_reset[128];
+static char radio_boot_select[128];
 static pid_t child = -1;
 static uint64_t started_at;
 static uint64_t next_start;
@@ -27,6 +29,8 @@ void cpcd_configure(const struct config *c)
 {
     snprintf(cpcd_path, sizeof(cpcd_path), "%s", c->cpcd_path);
     snprintf(cpcd_conf, sizeof(cpcd_conf), "%s", c->cpcd_conf);
+    snprintf(radio_reset, sizeof(radio_reset), "%s", c->radio_reset);
+    snprintf(radio_boot_select, sizeof(radio_boot_select), "%s", c->radio_boot_select);
     next_start = 0;
 }
 
@@ -36,10 +40,27 @@ pid_t cpcd_pid(void) { return child; }
  * endpoint), but on the R730's EFR32MG12 that reset lands the radio in its Gecko bootloader whenever the Bluetooth
  * scanner has run in the session before (the MG21 of the R560 is not affected); a hardware reset always boots the
  * application. Nothing is lost: cpcd's reset sequence follows anyway. APs without the line (no /proc/v54bsp/iot_rst)
- * skip this. */
+ * skip this, as does radio_reset = none. The line is iotd.conf's radio_reset (/proc/v54bsp/iot_rst unless the AP wires
+ * the radio differently: the R650's MG21 resets through sysfs gpio21). Where radio_boot_select names a line, it is
+ * driven 1 first: that is the bootloader's GPIO-activation pin, which the R650 brings out on gpio54, and a reset with
+ * it low (its pull-down) lands in the bootloader instead of the application. */
 static void radio_reset_pulse(void)
 {
-    static const char *line = "/proc/v54bsp/iot_rst";
+    const char *line = radio_reset;
+    if (line[0] == '\0' || !strcmp(line, "none")) {
+        return;
+    }
+    if (radio_boot_select[0] != '\0' && strcmp(radio_boot_select, "none") != 0) {
+        int bfd = open(radio_boot_select, O_WRONLY);
+        if (bfd >= 0) {
+            if (write(bfd, "1\n", 2) != 2) {
+                LOGW("could not deassert the boot-select line %s: %s", radio_boot_select, strerror(errno));
+            }
+            close(bfd);
+        } else {
+            LOGW("boot-select line %s: %s", radio_boot_select, strerror(errno));
+        }
+    }
     int fd = open(line, O_WRONLY);
     if (fd < 0) {
         return;

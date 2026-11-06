@@ -4,9 +4,9 @@
 #
 #   scripts/build-otbr.sh
 #
-# Needs: apt install gcc-arm-linux-gnueabi g++-arm-linux-gnueabi libc6-dev-armel-cross cmake, and the
+# Needs: apt install gcc-arm-linux-gnueabi g++-arm-linux-gnueabi libc6-dev-armel-cross cmake, the
 # third_party/gecko_sdk submodule (its util/third_party/ot-br-posix and openthread are the versions the RCP images are
-# built from, so host and radio speak the same Spinel).
+# built from, so host and radio speak the same Spinel) and scripts/build-ap.sh's libcpc.a.
 #
 # Changes for the AP's firmware:
 #   * otbr/0001-posix-netif-dummy-interface-without-tun.patch: the AP kernels have no tun driver, so the Thread
@@ -19,6 +19,9 @@
 #     file at /var/run/otbr-mdnsd(.pid) so it never meets the firmware's own mdnsd on /var/run/mdnsd, and
 #     otbr/0002-mdnsresponder-interface-allow-list.patch: only the interfaces in MDNSD_INTERFACES (iotd passes the
 #     infrastructure link), never an IPv4 link-local address
+#   * the RCP either on the UART (spinel+hdlc+uart://, the ot-rcp image) or through cpcd (spinel+cpc://, the ot-rcp-ble
+#     image, which shares the radio with a Bluetooth controller): the GSDK's CPC vendor interface and multi-PAN host
+#     support, linked against the libcpc of the cpcd the package ships
 #   * border routing, the border agent (_meshcop._udp), the SRP advertising proxy, the DNS-SD discovery proxy and the
 #     REST API (TCP 8081) on
 #
@@ -36,9 +39,12 @@ MDNS_URL="https://github.com/apple-oss-distributions/mDNSResponder/archive/refs/
 MDNS_SHA=ffb990231639dfe8c7f0b15d0665206a9013f1aacfb2cbb934eb87f6a57f38b7
 MDNS_SRC="$ROOT/build/otbr/$MDNS_NAME"
 MDNS_OUT="$ROOT/build/otbr/dns_sd"
+SILABS_POSIX="$ROOT/third_party/gecko_sdk/protocol/openthread/platform-abstraction/posix"
+CPC_LIB="$ROOT/build/cpc-daemon/libcpc.a"
 
 command -v "${CROSS}g++" >/dev/null || { echo "${CROSS}g++ not found: apt install g++-arm-linux-gnueabi" >&2; exit 1; }
 [[ -f "$GSDK_TP/ot-br-posix/CMakeLists.txt" ]] || { echo "GSDK not found: git submodule update --init third_party/gecko_sdk" >&2; exit 1; }
+[[ -f "$CPC_LIB" ]] || { echo "build first: scripts/build-ap.sh ($CPC_LIB missing)" >&2; exit 1; }
 
 echo "== mDNSResponder ($MDNS_NAME, pinned)"
 mkdir -p "$ROOT/.tools/dl"
@@ -85,9 +91,10 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
 EOF
 
 # GCC 13 warns about code GSDK 4.4.0's OpenThread was not built with; the project makes warnings errors.
-FLAGS="-Wno-maybe-uninitialized -Wno-array-bounds -Wno-stringop-overflow -Wno-stringop-overread -Wno-dangling-pointer"
+FLAGS="-Wno-maybe-uninitialized -Wno-array-bounds -Wno-stringop-overflow -Wno-stringop-overread -Wno-dangling-pointer -Wno-unused-but-set-variable"
 FLAGS="$FLAGS -Wno-uninitialized -Wno-error -ffile-prefix-map=$ROOT=."
 FLAGS="$FLAGS -DOPENTHREAD_POSIX_CONFIG_DAEMON_SOCKET_BASENAME=\\\"/var/run/openthread-%s\\\" -I$MDNS_OUT/include"
+FLAGS="$FLAGS -I$SILABS_POSIX"
 
 echo "== configure"
 cmake -S "$SRC" -B "$BUILD" \
@@ -102,6 +109,11 @@ cmake -S "$SRC" -B "$BUILD" \
   -DOTBR_SRP_ADVERTISING_PROXY=ON -DOTBR_DNSSD_DISCOVERY_PROXY=ON \
   -DOTBR_BORDER_ROUTING=ON -DOTBR_REST=ON \
   -DOTBR_DBUS=OFF -DOTBR_WEB=OFF -DOTBR_NOTIFY_UPSTART=OFF \
+  -DOT_MULTIPAN_RCP=ON -DOT_POSIX_RCP_VENDOR_BUS=ON \
+  -DOT_POSIX_CONFIG_RCP_VENDOR_INTERFACE="$SILABS_POSIX/cpc_interface.cpp" \
+  -DOT_POSIX_CONFIG_RCP_VENDOR_DEPS_PACKAGE="$SILABS_POSIX/posix_vendor_rcp.cmake" \
+  -DOT_PLATFORM_CONFIG=openthread-core-silabs-posix-config.h \
+  -DCPCD_SOURCE_DIR= -DCpc_LIBRARY="$CPC_LIB" -DCpc_INCLUDE_DIR="$ROOT/third_party/cpc-daemon/lib" \
   -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_CXX_FLAGS="$FLAGS" \
   -DCMAKE_EXE_LINKER_FLAGS="-static -L$MDNS_OUT/lib"
 

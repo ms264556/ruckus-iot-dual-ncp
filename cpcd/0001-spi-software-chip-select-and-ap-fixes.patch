@@ -1,0 +1,158 @@
+cpc-daemon 4.9.1 on the AP's SPI (the R650's EFR32MG21 on /dev/spidev0.2, kernel 4.4.60):
+
+* a software chip select: `spi_cs_gpio_chip` / `spi_cs_gpio` (a sysfs GPIO number) asserted around each of the
+  driver's two transfers, since the hardware chip-select pad is not routed on the AP;
+* sysfs outputs are created with direction `high`, so an active-low chip select never glitches low at start-up
+  (the secondary's LDMA chain counts chip-select edges);
+* the configured `spi_device_bitrate` from the first transfer on: the built-in 1 MHz initial rate drops bits on
+  the AP's lines (500 kHz is clean), and the secondary answers the bitrate query only after a frame round-trips;
+* never an RX-only transfer: a NULL tx_buf puts the IPQ8074 QUP driver in input-only mode, which corrupted the
+  late bytes of every payload read.
+
+Applied by scripts/build-ap.sh to a copy of third_party/cpc-daemon (v4.9.1).
+
+diff --git a/driver/driver_spi.c b/driver/driver_spi.c
+index ceb4346..a5c8978 100644
+--- a/driver/driver_spi.c
++++ b/driver/driver_spi.c
+@@ -59,6 +59,11 @@ static pthread_t drv_thread;
+ static bool drv_thread_started = false;
+ static int spi_dev_descriptor;
+ static gpio_t irq_gpio;
++static const uint8_t spi_zero_tx[SPI_BUFFER_SIZE] = { 0 };
++/* Software chip select (AP boards whose hardware CS pad is not routed): asserted around every transfer. */
++static gpio_t cs_gpio = NULL;
++static inline void cs_assert(void) { if (cs_gpio) gpio_write(cs_gpio, GPIO_VALUE_LOW); }
++static inline void cs_release(void) { if (cs_gpio) gpio_write(cs_gpio, GPIO_VALUE_HIGH); }
+ static bool secondary_started = false;
+ 
+ typedef void (*driver_epoll_callback_t)(void);
+@@ -79,6 +84,7 @@ static void driver_spi_cleanup(void)
+   close(fd_epoll);
+ 
+   gpio_deinit(irq_gpio);
++  if (cs_gpio) gpio_deinit(cs_gpio);
+ 
+   TRACE_DRIVER("SPI driver thread cancelled");
+ 
+@@ -126,6 +132,10 @@ static void spidev_setup(const char *device, uint32_t speed, const char *irq_gpi
+ 
+   // Setup IRQ gpio
+   irq_gpio = gpio_init(irq_gpio_chip, irq_gpio_pin, GPIO_DIRECTION_IN, GPIO_EDGE_FALLING);
++  if (config.spi_cs_pin >= 0) {
++    cs_gpio = gpio_init(config.spi_cs_chip, (unsigned int)config.spi_cs_pin, GPIO_DIRECTION_OUT, GPIO_EDGE_NO_EDGE);
++    gpio_write(cs_gpio, GPIO_VALUE_HIGH);
++  }
+ }
+ 
+ void driver_spi_init(int *fd_to_core,
+@@ -346,7 +356,7 @@ static void driver_spi_transaction(bool initiated_by_irq_line_event)
+ 
+   memset(&local_spi_transfer, 0x00, sizeof(local_spi_transfer));
+ 
+-  local_spi_transfer.speed_hz = server_core_max_bitrate_received() ? config.spi_bitrate : SPI_INITIAL_BITRATE;
++  local_spi_transfer.speed_hz = config.spi_bitrate; /* the configured bitrate from the first transfer on: the AP-side lines are marginal at 1 MHz */
+ 
+   TRACE_DRIVER("Init of a transaction caused by the %s", initiated_by_irq_line_event ? "IRQ line" : "core");
+ 
+@@ -415,14 +425,16 @@ static void driver_spi_transaction(bool initiated_by_irq_line_event)
+     if (want_to_transmit) {
+       local_spi_transfer.tx_buf = (unsigned long) tx_buffer;
+     } else {
+-      local_spi_transfer.tx_buf = (unsigned long) NULL; // Send 0s in case we just do a read
++      local_spi_transfer.tx_buf = (unsigned long) spi_zero_tx; /* never an RX-only transfer: the AP SPI controller corrupts late bytes in that mode */ // Send 0s in case we just do a read
+     }
+ 
+     local_spi_transfer.rx_buf = (unsigned long) rx_buffer;
+ 
+     local_spi_transfer.len = SLI_CPC_HDLC_HEADER_RAW_SIZE;
+ 
++    cs_assert();
+     int ret = ioctl(spi_dev_descriptor, SPI_IOC_MESSAGE(1), &local_spi_transfer);
++    cs_release();
+     FATAL_ON(ret != (int)local_spi_transfer.len);
+ 
+     TRACE_FRAME("Driver : Clocked in this header : ", rx_buffer, SLI_CPC_HDLC_HEADER_RAW_SIZE);
+@@ -533,7 +545,7 @@ static void driver_spi_transaction(bool initiated_by_irq_line_event)
+   // Clock the payload
+   {
+     if ((tx_length == 0) || want_to_transmit == false) {
+-      local_spi_transfer.tx_buf = (unsigned long) NULL;
++      local_spi_transfer.tx_buf = (unsigned long) spi_zero_tx; /* never an RX-only transfer: the AP SPI controller corrupts late bytes in that mode */
+     } else {
+       local_spi_transfer.tx_buf = (unsigned long) &tx_buffer[SLI_CPC_HDLC_HEADER_RAW_SIZE];
+     }
+@@ -548,7 +560,9 @@ static void driver_spi_transaction(bool initiated_by_irq_line_event)
+       local_spi_transfer.len = (unsigned int) payload_length;
+     }
+ 
++    cs_assert();
+     int ret = ioctl(spi_dev_descriptor, SPI_IOC_MESSAGE(1), &local_spi_transfer);
++    cs_release();
+     FATAL_ON(ret != (int)local_spi_transfer.len);
+   }
+ 
+diff --git a/include/cpcd/config.h b/include/cpcd/config.h
+index 533f797..d29e15c 100644
+--- a/include/cpcd/config.h
++++ b/include/cpcd/config.h
+@@ -91,6 +91,8 @@ typedef struct __attribute__((packed)) {
+   unsigned int spi_bitrate;
+   const char *spi_irq_chip;
+   unsigned int spi_irq_pin;
++  const char *spi_cs_chip;
++  int spi_cs_pin;
+ 
+   const char *fwu_reset_chip;
+   int fwu_spi_reset_pin;
+diff --git a/misc/config.c b/misc/config.c
+index 81bb372..13b86b8 100644
+--- a/misc/config.c
++++ b/misc/config.c
+@@ -92,6 +92,8 @@ config_t config = {
+   .spi_bitrate = 1000000,
+   .spi_irq_chip = NULL,
+   .spi_irq_pin = 0,
++  .spi_cs_chip = NULL,
++  .spi_cs_pin = -1,
+ 
+   // Firmware update
+   .fwu_reset_chip = NULL,
+@@ -375,6 +377,8 @@ void config_print(void)
+   CONFIG_PRINT_DEC_COND(config.spi_bitrate, config.bus == SPI);
+   CONFIG_PRINT_STR_COND(config.spi_irq_chip, config.bus == SPI);
+   CONFIG_PRINT_DEC_COND(config.spi_irq_pin, config.bus == SPI);
++  CONFIG_PRINT_STR_COND(config.spi_cs_chip, config.bus == SPI);
++  CONFIG_PRINT_DEC_COND(config.spi_cs_pin, config.bus == SPI);
+ 
+   CONFIG_PRINT_BOOL_TO_STR(config.fwu_recovery_pins_enabled);
+   CONFIG_PRINT_STR_COND(config.fwu_reset_chip, config.fwu_recovery_pins_enabled);
+@@ -936,6 +940,13 @@ static void config_parse_config_file(void)
+       if (*endptr != '\0') {
+         FATAL("Bad config line \"%s\"", line);
+       }
++    } else if (0 == strcmp(name, "spi_cs_gpio_chip")) {
++      config.spi_cs_chip = strdup(val);
++    } else if (0 == strcmp(name, "spi_cs_gpio")) {
++      config.spi_cs_pin = (int)strtol(val, &endptr, 10);
++      if (*endptr != '\0') {
++        FATAL("Bad config line \"%s\"", line);
++      }
+     } else if (0 == strcmp(name, "spi_device_bitrate")) {
+       config.spi_bitrate = (unsigned int)strtoul(val, &endptr, 10);
+       if (*endptr != '\0') {
+diff --git a/misc/gpio_sysfs.c b/misc/gpio_sysfs.c
+index 0c4e1c7..af42d66 100644
+--- a/misc/gpio_sysfs.c
++++ b/misc/gpio_sysfs.c
+@@ -106,8 +106,8 @@ static int set_direction(gpio_sysfs_t *gpio, gpio_direction_t direction)
+     ret = simple_write(buf, "in");
+     FATAL_SYSCALL_ON(ret != 2);
+   } else if (direction == GPIO_DIRECTION_OUT) {
+-    ret = simple_write(buf, "out");
+-    FATAL_SYSCALL_ON(ret != 3);
++    ret = simple_write(buf, "high"); /* out, already high: no low glitch on an active-low chip select */
++    FATAL_SYSCALL_ON(ret != 3 && ret != 4);
+   }
+ 
+   return ret;

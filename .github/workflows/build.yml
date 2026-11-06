@@ -78,6 +78,8 @@ jobs:
 
       - name: Build firmware (EFR32MG12)
         run: scripts/build-firmware.sh mg12
+      - name: Build firmware (EFR32MG21 on SPI)
+        run: scripts/build-firmware.sh mg21spi
 
       - name: Build Thread RCP (EFR32MG21)
         run: scripts/build-thread.sh mg21 ot-rcp

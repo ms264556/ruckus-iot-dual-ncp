@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build an OpenThread image for an AP's built-in IoT radio.
 #
-#   scripts/build-thread.sh [mg21|mg12] [ot-rcp|ot-cli-ftd]        (default mg21 ot-rcp)
+#   scripts/build-thread.sh [mg21|mg12|mg21spi] [ot-rcp|ot-cli-ftd]        (default mg21 ot-rcp)
 #   NCP_DEADMAN_MINUTES=3 scripts/build-thread.sh mg12 ot-rcp     lab build with the dead-man reboot
 #
 # Needs what scripts/build-firmware.sh needs (scripts/setup-tools.sh, the gecko_sdk submodule
@@ -37,14 +37,18 @@ DEADMAN="${NCP_DEADMAN_MINUTES:-0}"
 case "$TARGET" in
   mg21) BOARD=brd4180b ;;
   mg12) BOARD=brd4162a ;;
-  *) echo "usage: $0 [mg21|mg12] [ot-rcp|ot-cli-ftd]" >&2; exit 2 ;;
+  mg21spi) BOARD=brd4180b ;;
+  *) echo "usage: $0 [mg21|mg12|mg21spi] [ot-rcp|ot-cli-ftd]" >&2; exit 2 ;;
 esac
 SDK="$ROOT/third_party/gecko_sdk"
 APPS="$SDK/protocol/openthread/sample-apps"
 case "$IMAGE" in
-  ot-rcp) SLCP="$APPS/ot-ncp/ot-rcp.slcp" ;;
+  ot-rcp) SLCP="$APPS/ot-ncp/ot-rcp.slcp"
+          # mg21spi: the RCP behind CPC on the AP SPI (ot_ncp_cpc + cpc_secondary_driver_spi_usart:exp), with the pins
+          # firmware/patch_project.py sets for the R650; otbr-agent takes it as spinel+cpc://cpcd_0
+          [[ "$TARGET" == mg21spi ]] && SLCP="$APPS/ot-ncp/rcp-spi-802154.slcp" ;;
   ot-cli-ftd) SLCP="$APPS/ot-cli/ot-cli-ftd.slcp" ;;
-  *) echo "usage: $0 [mg21|mg12] [ot-rcp|ot-cli-ftd]" >&2; exit 2 ;;
+  *) echo "usage: $0 [mg21|mg12|mg21spi] [ot-rcp|ot-cli-ftd]" >&2; exit 2 ;;
 esac
 [[ "$DEADMAN" =~ ^[0-9]+$ ]] || { echo "NCP_DEADMAN_MINUTES must be a number of minutes" >&2; exit 2; }
 SUFFIX="efr32$TARGET"
@@ -53,9 +57,12 @@ VERSION="$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo unknown)"
 dirty=0; git -C "$ROOT" diff-index --quiet --ignore-submodules HEAD -- 2>/dev/null || dirty=$?
 [[ $dirty == 1 ]] && VERSION="$VERSION-dirty"
 VERSION="$VERSION-$TARGET"
+# The CPC images answer cpcd's version query: "-thread" tells the SPI RCP from the dual NCP of the same target.
+[[ "$TARGET" == mg21spi ]] && VERSION="$VERSION-thread"
 [[ "$DEADMAN" != 0 ]] && VERSION="$VERSION-deadman$DEADMAN"
 
 WORK="$ROOT/build/firmware/$IMAGE-$TARGET"
+PROJECT="$(basename "$SLCP" .slcp)"   # the generated project is named after the sample (rcp-spi-802154 for mg21spi)
 OUT="$ROOT/out/firmware"
 GBL="$OUT/$IMAGE-gsdk4.4.0-$SUFFIX.gbl"
 
@@ -83,11 +90,18 @@ mkdir -p "$WORK" "$OUT"
 
 echo "== patch generated project"
 "$PYTHON" "$ROOT/firmware/patch_lfrco.py" "$WORK"
+if [[ "$TARGET" == mg21spi ]]; then
+  # The CPC RCP sample enables link encryption; the AP's cpcd is built without it, as for the dual NCP.
+  SEC="$WORK/config/sl_cpc_security_config.h"
+  sed -i -E 's/(#define SL_CPC_SECURITY_ENABLED)[[:space:]]+1\b/\1 0/' "$SEC"
+  grep -Eq '#define SL_CPC_SECURITY_ENABLED[[:space:]]+0\b' "$SEC" || { echo "failed to disable CPC security in $SEC" >&2; exit 1; }
+  echo "CPC security disabled"
+fi
 "$PYTHON" "$ROOT/firmware/patch_project.py" "$WORK" "$TARGET" "$VERSION" "$DEADMAN" thread
 
 echo "== make"
-make -C "$WORK" -f "$IMAGE.Makefile" -j"$(nproc)"
-"$ARM_GCC_DIR/bin/arm-none-eabi-size" "$WORK/build/debug/$IMAGE.out"
+make -C "$WORK" -f "$PROJECT.Makefile" -j"$(nproc)"
+"$ARM_GCC_DIR/bin/arm-none-eabi-size" "$WORK/build/debug/$PROJECT.out"
 
 echo "== package"
-"$PYTHON" "$ROOT/firmware/make_gbl.py" "$WORK/build/debug/$IMAGE.hex" "$GBL" --type thread --version 1
+"$PYTHON" "$ROOT/firmware/make_gbl.py" "$WORK/build/debug/$PROJECT.hex" "$GBL" --type thread --version 1

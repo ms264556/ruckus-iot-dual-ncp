@@ -16,8 +16,10 @@ void config_defaults(struct config *c)
     c->zigbee_port = 6638;
     snprintf(c->cpcd_path, sizeof(c->cpcd_path), "/writable/data/bin/cpcd");
     snprintf(c->cpcd_conf, sizeof(c->cpcd_conf), "/writable/data/bin/cpcd.conf");
+    snprintf(c->radio_reset, sizeof(c->radio_reset), "/proc/v54bsp/iot_rst");
     c->api_mdns = true;
     snprintf(c->thread_uart, sizeof(c->thread_uart), "/dev/ttyMSM1");
+    c->thread_cpc_iid = 1;
     c->thread_port = 6640;
     snprintf(c->thread_infra, sizeof(c->thread_infra), "br0");
     snprintf(c->otbr_path, sizeof(c->otbr_path), "/writable/data/bin/otbr-agent");
@@ -217,6 +219,14 @@ int config_load(struct config *c, const char *path)
             snprintf(c->cpcd_path, sizeof(c->cpcd_path), "%s", val);
         } else if (!strcmp(key, "cpcd_conf")) {
             snprintf(c->cpcd_conf, sizeof(c->cpcd_conf), "%s", val);
+        } else if (!strcmp(key, "thread_cpc")) {
+            bad = parse_bool(val, &c->thread_cpc);
+        } else if (!strcmp(key, "thread_cpc_iid")) {
+            c->thread_cpc_iid = (int)strtol(val, NULL, 10);
+        } else if (!strcmp(key, "radio_reset")) {
+            snprintf(c->radio_reset, sizeof(c->radio_reset), "%s", val);
+        } else if (!strcmp(key, "radio_boot_select")) {
+            snprintf(c->radio_boot_select, sizeof(c->radio_boot_select), "%s", val);
         } else {
             LOGW("%s:%d: unknown key '%s' ignored", path, lineno, key);
         }

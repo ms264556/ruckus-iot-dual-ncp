@@ -1,6 +1,8 @@
 /* ncpflash: flash a GBL image onto the AP's built-in IoT radio through its Gecko bootloader.
  *
  *   ncpflash [--enter pins|ezsp|spinel|none] <file.gbl> [uart]        uart defaults to /dev/ttyMSM1
+ *   ncpflash --enter spi|none <file.gbl> /dev/spidevB.C [cs,irq,rst,boot]   a radio on SPI (sysfs GPIO numbers,
+ *                                                                        default 22,55,21,54: the R650's EFR32MG21)
  *
  * Gets the radio to its bootloader menu, uploads over XMODEM-CRC at 115200, then runs the
  * new application. Nothing else may hold the UART while it runs. A radio already at the
@@ -17,6 +19,12 @@
  *   spinel  ask the running OpenThread RCP: Spinel CMD_RESET with RESET_BOOTLOADER in HDLC-lite
  *         framing, RTS/CTS on (this package's ot-rcp images, built with the platform bootloader mode)
  *   none  the radio must already be at the prompt
+ *   spi   a radio on SPI with the Gecko EZSP-SPI bootloader: its boot-select line held low through a reset pulse
+ *         (the bootloader's GPIO activation; on the R650 the line the vendor calls nWAKE), then the bootloader's
+ *         query handshake and XMODEM-CRC blocks inside 0xFD bootloader frames, at 500 kHz with a software chip
+ *         select. With a /dev/spidev device, --enter none takes a radio already in that bootloader (after
+ *         cpcd --enter-bootloader with the boot-select line low). The boot-select line is left high afterwards,
+ *         so the application boots on every later reset, including the ones cpcd makes.
  *
  * Only pins touches iot_rcv; ezsp may pulse iot_rst, which restarts the application.
  *
@@ -35,6 +43,8 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
+#include <linux/spi/spidev.h>
 #include <signal.h>
 
 #include "ash_codec.h"
@@ -541,6 +551,284 @@ static int xmodem_send(int fd, const unsigned char *data, size_t len)
     return -1;
 }
 
+/* ---- SPI: the Gecko EZSP-SPI bootloader (btl_ezsp_spi_common.c), for a radio on /dev/spidev --------------------- */
+
+static int spi_fd = -1;
+static int spi_cs = 22, spi_irq = 55, spi_rst = 21, spi_boot = 54; /* sysfs GPIO numbers */
+static unsigned spi_speed = 500000;
+
+static void spi_gpio_export(int gpio)
+{
+    char p[64], v[16];
+    snprintf(p, sizeof(p), "/sys/class/gpio/gpio%d/value", gpio);
+    if (access(p, F_OK) == 0) {
+        return;
+    }
+    snprintf(v, sizeof(v), "%d", gpio);
+    gpio_write("/sys/class/gpio/export", v);
+}
+
+static void spi_gpio_dir(int gpio, const char *dir)
+{
+    char p[64];
+    spi_gpio_export(gpio);
+    snprintf(p, sizeof(p), "/sys/class/gpio/gpio%d/direction", gpio);
+    gpio_write(p, dir);
+}
+
+static void spi_gpio_set(int gpio, int v)
+{
+    char p[64];
+    snprintf(p, sizeof(p), "/sys/class/gpio/gpio%d/value", gpio);
+    gpio_write(p, v ? "1" : "0");
+}
+
+static int spi_gpio_get(int gpio)
+{
+    char p[64], b[4] = { 0 };
+    snprintf(p, sizeof(p), "/sys/class/gpio/gpio%d/value", gpio);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    int n = read(fd, b, 1);
+    close(fd);
+    return n == 1 ? b[0] - '0' : -1;
+}
+
+static int spi_wait_irq(int level, int timeout_ms)
+{
+    long t0 = ms_now();
+    while (ms_now() - t0 < timeout_ms) {
+        if (spi_gpio_get(spi_irq) == level) {
+            return 0;
+        }
+        usleep(1000);
+    }
+    return -1;
+}
+
+static int spi_xfer(const uint8_t *tx, uint8_t *rx, int len)
+{
+    struct spi_ioc_transfer t;
+    memset(&t, 0, sizeof(t));
+    t.tx_buf = (unsigned long)tx; /* always a TX buffer: an RX-only transfer corrupts bytes on the AP controller */
+    t.rx_buf = (unsigned long)rx;
+    t.len = len;
+    t.speed_hz = spi_speed;
+    t.bits_per_word = 8;
+    return ioctl(spi_fd, SPI_IOC_MESSAGE(1), &t) == len ? 0 : -1;
+}
+
+/* One EZSP-SPI transaction: chip select, the command, then 0xFF until the reply starts and on to its 0xA7
+ * terminator. Returns the reply length, 0 on a timeout, -1 on an error. */
+static int spi_transaction(const uint8_t *cmd, int n, uint8_t *resp, int max, int timeout_ms)
+{
+    uint8_t ff = 0xff, rx = 0, junk[160];
+    int len = 0, want = -1;
+    spi_gpio_set(spi_cs, 0);
+    usleep(20);
+    if (spi_xfer(cmd, junk, n) < 0) {
+        spi_gpio_set(spi_cs, 1);
+        return -1;
+    }
+    long t0 = ms_now();
+    for (;;) {
+        if (spi_xfer(&ff, &rx, 1) < 0) {
+            spi_gpio_set(spi_cs, 1);
+            return -1;
+        }
+        if (rx != 0xff) {
+            break;
+        }
+        if (ms_now() - t0 > timeout_ms) {
+            spi_gpio_set(spi_cs, 1);
+            return 0;
+        }
+    }
+    resp[len++] = rx;
+    if (rx == 0xfe || rx == 0xfd) {
+        want = -2;
+    }
+    while (len < max) {
+        if (spi_xfer(&ff, &rx, 1) < 0) {
+            break;
+        }
+        resp[len++] = rx;
+        if (want == -2) {
+            want = rx + 3;
+        }
+        if (rx == 0xa7 && (want < 0 || len >= want)) {
+            break;
+        }
+        if (want > 0 && len >= want) {
+            break;
+        }
+    }
+    spi_gpio_set(spi_cs, 1);
+    usleep(2000);
+    return len;
+}
+
+static int spi_bl_query(uint8_t *resp, int max)
+{
+    static const uint8_t q[] = { 0xfd, 0x01, 0x51, 0xa7 }; /* 'Q' */
+    return spi_transaction(q, sizeof(q), resp, max, 3000);
+}
+
+/* The bootloader answers a query frame at once (QUERYFOUND, or the result code of the last block) and raises its
+ * nHOST_INT when the result of that is ready to be fetched with another 'Q'. */
+static int spi_bl_result(uint8_t *resp, int max)
+{
+    if (spi_wait_irq(0, 5000) != 0) {
+        fprintf(stderr, "spi: no nHOST_INT within 5 s\n");
+        return -1;
+    }
+    return spi_bl_query(resp, max);
+}
+
+/* Is the radio at its EZSP-SPI bootloader? Reads a pending reset indication first, then expects QUERYFOUND and the
+ * query response (the bootloader version is in it). */
+static int spi_bl_present(void)
+{
+    uint8_t resp[160];
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int n = spi_bl_query(resp, sizeof(resp));
+        if (n >= 3 && resp[0] == 0xfd && resp[2] == 0x1a) {
+            n = spi_bl_result(resp, sizeof(resp));
+            if (n >= 27 && resp[2] == 0x52) {
+                fprintf(stderr, "spi: Gecko bootloader %d.%d (EZSP-SPI)\n", resp[26], resp[27]);
+                return 1;
+            }
+            return 0;
+        }
+        if (n >= 2 && resp[0] == 0x00) {
+            fprintf(stderr, "spi: reset indication, cause 0x%02x\n", resp[1]);
+            usleep(300000);
+            continue;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static void spi_enter_bootloader(void)
+{
+    fprintf(stderr, "spi: boot-select gpio%d low, reset pulse on gpio%d\n", spi_boot, spi_rst);
+    spi_gpio_dir(spi_boot, "low");
+    usleep(10000);
+    spi_gpio_dir(spi_rst, "high");
+    spi_gpio_set(spi_rst, 0);
+    usleep(100000);
+    spi_gpio_set(spi_rst, 1);
+    if (spi_wait_irq(0, 2000) != 0) {
+        fprintf(stderr, "spi: nHOST_INT not asserted after the reset\n");
+    }
+    usleep(50000);
+    spi_gpio_dir(spi_boot, "high"); /* every later reset boots the application */
+    usleep(1500000);                /* the bootloader starts talking after about a second */
+}
+
+static int spi_upload(const unsigned char *img, size_t size)
+{
+    uint8_t resp[160];
+    size_t blocks = (size + 127) / 128;
+    long t0 = ms_now();
+    for (size_t i = 0; i < blocks; i++) {
+        uint8_t frame[136];
+        uint8_t blk = (uint8_t)((i + 1) & 0xff);
+        size_t left = size - i * 128;
+        frame[0] = 0xfd;
+        frame[1] = 133;
+        frame[2] = SOH;
+        frame[3] = blk;
+        frame[4] = (uint8_t)(255 - blk);
+        memset(frame + 5, 0xff, 128);
+        memcpy(frame + 5, img + i * 128, left < 128 ? left : 128);
+        uint16_t crc = crc16(frame + 5, 128);
+        frame[133] = (uint8_t)(crc >> 8);
+        frame[134] = (uint8_t)(crc & 0xff);
+        frame[135] = 0xa7;
+        int ok = 0;
+        for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+            int n = spi_transaction(frame, sizeof(frame), resp, sizeof(resp), 3000);
+            if (n < 3 || resp[0] != 0xfd) {
+                fprintf(stderr, "block %zu: no reply (attempt %d)\n", i + 1, attempt + 1);
+                continue;
+            }
+            if (resp[2] == 0x18) {
+                fprintf(stderr, "block %zu: the bootloader rejected the image (FILEABORT)\n", i + 1);
+                return -1;
+            }
+            if (resp[2] != 0x19) {
+                fprintf(stderr, "block %zu: reply 0x%02x (attempt %d)\n", i + 1, resp[2], attempt + 1);
+                if (spi_wait_irq(0, 2000) == 0) {
+                    spi_bl_query(resp, sizeof(resp));
+                }
+                continue;
+            }
+            n = spi_bl_result(resp, sizeof(resp));
+            if (n >= 4 && resp[0] == 0xfd && resp[2] == ACK && resp[3] == blk) {
+                ok = 1;
+            } else {
+                fprintf(stderr, "block %zu: no ACK (attempt %d)\n", i + 1, attempt + 1);
+            }
+        }
+        if (!ok) {
+            fprintf(stderr, "block %zu failed three times\n", i + 1);
+            return -1;
+        }
+        if ((i + 1) % 200 == 0 || i + 1 == blocks) {
+            fprintf(stderr, "%zu/%zu blocks (%ld s)\n", i + 1, blocks, (ms_now() - t0) / 1000);
+        }
+    }
+    static const uint8_t eot[] = { 0xfd, 0x01, EOT, 0xa7 };
+    int n = spi_transaction(eot, sizeof(eot), resp, sizeof(resp), 3000);
+    if (n < 3 || resp[2] != 0x17) {
+        fprintf(stderr, "EOT not acknowledged with FILEDONE\n");
+        return -1;
+    }
+    spi_bl_result(resp, sizeof(resp));
+    fprintf(stderr, "%zu bytes uploaded in %ld s; the bootloader reboots into the image\n", size, (ms_now() - t0) / 1000);
+    return 0;
+}
+
+static int spi_flash(const char *dev, const char *lines, const char *enter, const unsigned char *buf, size_t size)
+{
+    if (lines && sscanf(lines, "%d,%d,%d,%d", &spi_cs, &spi_irq, &spi_rst, &spi_boot) != 4) {
+        fprintf(stderr, "lines must be cs,irq,rst,boot (sysfs GPIO numbers)\n");
+        return 2;
+    }
+    spi_fd = open(dev, O_RDWR);
+    if (spi_fd < 0) {
+        perror(dev);
+        return 1;
+    }
+    uint8_t mode = SPI_MODE_0, bits = 8;
+    ioctl(spi_fd, SPI_IOC_WR_MODE, &mode);
+    ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+    ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &spi_speed);
+    spi_gpio_dir(spi_irq, "in");
+    spi_gpio_dir(spi_cs, "high");
+    fprintf(stderr, "spi %s (cs gpio%d, irq gpio%d, rst gpio%d, boot-select gpio%d)\n", dev, spi_cs, spi_irq, spi_rst, spi_boot);
+    if (spi_bl_present()) {
+        fprintf(stderr, "already at the bootloader\n");
+    } else if (strcmp(enter, "none") == 0) {
+        fprintf(stderr, "no bootloader on the SPI\n");
+        return 1;
+    } else {
+        spi_enter_bootloader();
+        if (!spi_bl_present()) {
+            fprintf(stderr, "no bootloader after the reset\n");
+            return 1;
+        }
+    }
+    int r = spi_upload(buf, size);
+    spi_gpio_dir(spi_boot, "high");
+    close(spi_fd);
+    return r == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *enter = "pins";
@@ -549,13 +837,19 @@ int main(int argc, char **argv)
         enter = argv[2];
         arg = 3;
     }
-    if (argc <= arg || (strcmp(enter, "pins") && strcmp(enter, "ezsp") && strcmp(enter, "spinel") && strcmp(enter, "none"))) {
-        fprintf(stderr, "usage: %s [--enter pins|ezsp|spinel|none] <file.gbl> [uart]\n", argv[0]);
+    if (argc <= arg || (strcmp(enter, "pins") && strcmp(enter, "ezsp") && strcmp(enter, "spinel") && strcmp(enter, "none") && strcmp(enter, "spi"))) {
+        fprintf(stderr, "usage: %s [--enter pins|ezsp|spinel|none] <file.gbl> [uart]\n"
+                        "       %s --enter spi|none <file.gbl> /dev/spidevB.C [cs,irq,rst,boot]\n", argv[0], argv[0]);
         return 2;
     }
     const char *image = argv[arg];
     const char *uart = argc > arg + 1 ? argv[arg + 1] : "/dev/ttyMSM1";
     int pins = strcmp(enter, "pins") == 0;
+    int spi = strcmp(enter, "spi") == 0 || strncmp(uart, "/dev/spidev", 11) == 0;
+    if (spi && strcmp(enter, "spi") && strcmp(enter, "none")) {
+        fprintf(stderr, "a radio on SPI takes --enter spi or none\n");
+        return 2;
+    }
     signal(SIGALRM, on_alarm);
     alarm(240);
 
@@ -577,6 +871,9 @@ int main(int argc, char **argv)
     fclose(f);
     fprintf(stderr, "image %s: %ld bytes\n", image, (long)st.st_size);
 
+    if (spi) {
+        return spi_flash(uart, argc > arg + 2 ? argv[arg + 2] : NULL, enter, buf, st.st_size);
+    }
     fprintf(stderr, "uart %s\n", uart);
     int fd = serial_open(uart, 115200);
     if (fd < 0) {

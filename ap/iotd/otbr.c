@@ -28,6 +28,8 @@ static struct {
     char path[256];
     char mdnsd[256];
     uint64_t mdnsd_checked_at;
+    bool cpc;                 /* the RCP is behind cpcd (thread_cpc) */
+    int cpc_iid;
     char uart[64];
     char infra[16];
     pid_t child;
@@ -218,7 +220,11 @@ static void start(uint64_t now)
 {
     char url[160];
     mdnsd_ensure();
-    snprintf(url, sizeof(url), "spinel+hdlc+uart://%s?uart-baudrate=115200&uart-flow-control", O.uart);
+    if (O.cpc) {
+        snprintf(url, sizeof(url), "spinel+cpc://%s?iid=%d&iid-list=0", IOTD_CPCD_INSTANCE, O.cpc_iid);
+    } else {
+        snprintf(url, sizeof(url), "spinel+hdlc+uart://%s?uart-baudrate=115200&uart-flow-control", O.uart);
+    }
     routing_on();
     pid_t p = fork();
     if (p < 0) {
@@ -252,6 +258,11 @@ int otbr_init(const struct config *c)
     snprintf(O.path, sizeof(O.path), "%s", c->otbr_path);
     snprintf(O.mdnsd, sizeof(O.mdnsd), "%s", c->mdnsd_path);
     snprintf(O.uart, sizeof(O.uart), "%s", c->thread_uart);
+    O.cpc = c->thread_cpc;
+    O.cpc_iid = c->thread_cpc_iid;
+    if (O.cpc) {
+        snprintf(O.uart, sizeof(O.uart), "cpcd (%s)", IOTD_CPCD_INSTANCE);
+    }
     snprintf(O.infra, sizeof(O.infra), "%s", c->thread_infra);
     O.log_flags = O_WRONLY | O_CREAT | O_TRUNC;
     O.next_start = 0;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the dual Zigbee + Bluetooth NCP image for an AP's built-in IoT radio.
 #
-#   scripts/build-firmware.sh [mg21|mg12]        (default mg21)
+#   scripts/build-firmware.sh [mg21|mg12|mg21spi]        (default mg21)
 #   NCP_DEADMAN_MINUTES=3 scripts/build-firmware.sh mg12   lab build with the dead-man reboot
 #
 # Needs: scripts/setup-tools.sh run once, and the third_party/gecko_sdk submodule checked
@@ -15,6 +15,10 @@
 #   mg12  brd4162a (EFR32MG12, Series 1, USART0 TX PA0 / RX PA1 location 0, CTS PA2 / RTS
 #         PA3 location 30): the R730's radio. The dev kit's SPI flash shutdown and SWO
 #         output are switched off, since they drive pins the module may use otherwise.
+#   mg21spi  brd4180b with the CPC SPI secondary driver (cpc_secondary_driver_spi_usart, instance
+#         exp) in place of the UART one: the R650's EFR32MG21 (an MGM210L-style layout) on the AP's
+#         SPI, USART2 with the host's MOSI on PC1, MISO on PC0, CLK PC2, CS PC3, and the IRQ
+#         (HOST_INT) on PA4 (firmware/patch_project.py edits the generated exp config).
 # with these changes to the generated project:
 #   * clock tree on the internal LFRCO (firmware/patch_lfrco.py)
 #   * CPC link encryption off (SL_CPC_SECURITY_ENABLED 0; cpcd is built without it)
@@ -36,10 +40,17 @@ DEADMAN="${NCP_DEADMAN_MINUTES:-0}"
 case "$TARGET" in
   mg21) BOARD=brd4180b ;;
   mg12) BOARD=brd4162a ;;
-  *) echo "usage: $0 [mg21|mg12]" >&2; exit 2 ;;
+  mg21spi) BOARD=brd4180b ;;
+  *) echo "usage: $0 [mg21|mg12|mg21spi]" >&2; exit 2 ;;
 esac
 [[ "$DEADMAN" =~ ^[0-9]+$ ]] || { echo "NCP_DEADMAN_MINUTES must be a number of minutes" >&2; exit 2; }
 SUFFIX="efr32$TARGET"
+SLC_WITH="$BOARD"
+SLC_WITHOUT=()
+if [[ "$TARGET" == mg21spi ]]; then
+  SLC_WITH="$BOARD,cpc_secondary_driver_spi_usart:exp"
+  SLC_WITHOUT=(--without cpc_secondary_driver_uart_usart)
+fi
 [[ "$DEADMAN" != 0 ]] && SUFFIX="$SUFFIX-deadman$DEADMAN"
 # Not `describe --dirty`: it also inspects submodules, and CI restores the GSDK from a cache without its
 # .git/modules entry, which makes describe fail and stamped release images "unknown".
@@ -69,7 +80,7 @@ mkdir -p "$WORK" "$OUT"
 # shellcheck disable=SC2086
 "$SLC" generate \
   --trust-totality \
-  --with "$BOARD" \
+  --with "$SLC_WITH" "${SLC_WITHOUT[@]}" \
   --project-file "$SLCP" \
   --export-destination "$WORK" \
   --copy-proj-sources --copy-sdk-sources --new-project \

@@ -15,6 +15,7 @@ DIST="$ROOT/dist"
 EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct)}"
 
 for f in "$OUT/firmware/dual-ncp-gsdk4.4.0-efr32mg21.gbl" "$OUT/firmware/dual-ncp-gsdk4.4.0-efr32mg12.gbl" \
+         "$OUT/firmware/dual-ncp-gsdk4.4.0-efr32mg21spi.gbl" \
          "$OUT/firmware/ot-rcp-gsdk4.4.0-efr32mg21.gbl" "$OUT/firmware/ot-rcp-gsdk4.4.0-efr32mg12.gbl" "$OUT/ap/iotd" \
          "$OUT/otbr/otbr-agent" "$OUT/otbr/ot-ctl" "$OUT/otbr/mdnsd"; do
   [[ -f "$f" ]] || { echo "build first: scripts/build-firmware.sh mg21 and mg12, scripts/build-thread.sh mg21 ot-rcp and mg12 ot-rcp, scripts/build-ap.sh, scripts/build-otbr.sh ($f missing)" >&2; exit 1; }
