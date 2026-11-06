@@ -105,7 +105,10 @@ def main() -> int:
         mak.write_text(src)
         print(f"{mak.name}: OPENTHREAD_CONFIG_PLATFORM_BOOTLOADER_MODE_ENABLE 1")
 
-        uart = next(root.glob("gecko_sdk_*/protocol/openthread/platform-abstraction/efr32/uartdrv_uart.c"))
+        uart = next(root.glob("gecko_sdk_*/protocol/openthread/platform-abstraction/efr32/uartdrv_uart.c"), None)
+        if uart is None:
+            print("no Spinel UART driver (CPC transport): cpcd's version query marks the host as seen")
+    if thread and uart is not None:
         src = uart.read_text()
         src, count = re.subn(r"^(\s+)otPlatUartReceived\(", r"\1ncp_host_seen_mark();\n\1otPlatUartReceived(", src, flags=re.M)
         if count != 2:
