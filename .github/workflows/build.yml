@@ -87,6 +87,9 @@ jobs:
       - name: Build Thread RCP (EFR32MG12)
         run: scripts/build-thread.sh mg12 ot-rcp
 
+      - name: Build Thread RCP (EFR32MG21 on SPI)
+        run: scripts/build-thread.sh mg21spi ot-rcp
+
       - name: Build AP programs
         run: scripts/build-ap.sh
 

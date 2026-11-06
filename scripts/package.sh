@@ -3,7 +3,7 @@
 #
 #   scripts/package.sh
 #
-# Run after build-firmware.sh, build-thread.sh (ot-rcp for mg21 and mg12), build-ap.sh and
+# Run after build-firmware.sh, build-thread.sh (ot-rcp for mg21, mg12 and mg21spi), build-ap.sh and
 # build-otbr.sh. ap-armv7.tar.gz depends only on the files' contents and the commit: names are sorted, owner and group are 0, permissions are fixed
 # (755 programs and scripts, 644 configuration), every timestamp is the commit time
 # (SOURCE_DATE_EPOCH, from git when unset), and gzip stores no name or time.
@@ -16,9 +16,10 @@ EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct)}"
 
 for f in "$OUT/firmware/dual-ncp-gsdk4.4.0-efr32mg21.gbl" "$OUT/firmware/dual-ncp-gsdk4.4.0-efr32mg12.gbl" \
          "$OUT/firmware/dual-ncp-gsdk4.4.0-efr32mg21spi.gbl" \
-         "$OUT/firmware/ot-rcp-gsdk4.4.0-efr32mg21.gbl" "$OUT/firmware/ot-rcp-gsdk4.4.0-efr32mg12.gbl" "$OUT/ap/iotd" \
+         "$OUT/firmware/ot-rcp-gsdk4.4.0-efr32mg21.gbl" "$OUT/firmware/ot-rcp-gsdk4.4.0-efr32mg12.gbl" \
+         "$OUT/firmware/ot-rcp-gsdk4.4.0-efr32mg21spi.gbl" "$OUT/ap/iotd" \
          "$OUT/otbr/otbr-agent" "$OUT/otbr/ot-ctl" "$OUT/otbr/mdnsd"; do
-  [[ -f "$f" ]] || { echo "build first: scripts/build-firmware.sh mg21 and mg12, scripts/build-thread.sh mg21 ot-rcp and mg12 ot-rcp, scripts/build-ap.sh, scripts/build-otbr.sh ($f missing)" >&2; exit 1; }
+  [[ -f "$f" ]] || { echo "build first: scripts/build-firmware.sh mg21, mg12 and mg21spi, scripts/build-thread.sh mg21, mg12 and mg21spi ot-rcp, scripts/build-ap.sh, scripts/build-otbr.sh ($f missing)" >&2; exit 1; }
 done
 # The border router programs travel with the other AP programs.
 cp "$OUT/otbr/otbr-agent" "$OUT/otbr/ot-ctl" "$OUT/otbr/mdnsd" "$OUT/ap/"
